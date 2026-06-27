@@ -1,0 +1,80 @@
+# ====== Python ======
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+*.db
+*.db-wal
+*.db-shm
+
+# ====== Node.js ======
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ====== 环境变量 & 密钥 ======
+.env
+.env.local
+.env.*.local
+
+# ====== 日志 ======
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ====== IDE / 编辑器 ======
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# ====== 操作系统 ======
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ====== 运行时数据（保留目录结构，忽略运行数据）======
+backend/data/logs.db
+backend/data/logs.db-wal
+backend/data/logs.db-shm
+
+# ====== Docker ======
+docker-compose.override.yml
+
+# ====== 测试 & 覆盖率 ======
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# ====== 构建产物 ======
+*.tsbuildinfo
+
+# ====== 临时文件 ======
+*.tmp
+*.bak
+*.orig

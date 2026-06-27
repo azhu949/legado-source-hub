@@ -1,0 +1,13 @@
+[project]
+name = "book-aggregator-backend"
+version = "2.0.0"
+description = "聚合书源管理系统后端"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

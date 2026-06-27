@@ -1,0 +1,44 @@
+{
+  "bookSourceName": "台灣小說網",
+  "bookSourceGroup": "写源",
+  "bookSourceUrl": "https://www.xsw.tw",
+  "enabled": true,
+  "weight": 100,
+  "searchUrl": "/modules/article/search.php?searchkey={{encodeURIComponent(key)}}",
+  "ruleSearch": {
+    "bookList": "#alistbox",
+    "name": ".title h2 a@text",
+    "author": ".title span@text##作者：",
+    "kind": "",
+    "lastChapter": ".sys a@text",
+    "intro": ".intro@text",
+    "coverUrl": ".pic img@src",
+    "noteUrl": ".title h2 a@href",
+    "wordCount": ""
+  },
+  "ruleBookInfo": {
+    "name": "//h1[contains(@class,'f20h')]/text()[1]",
+    "author": "h1.f20h em@text##作者：",
+    "kind": ".bread-crumbs li:nth-child(2) a@text",
+    "lastChapter": ".book_newchap .con p.ti:first-child a@text",
+    "wordCount": "",
+    "intro": ".box_info .intro@text",
+    "coverUrl": ".box_intro .pic img@src",
+    "tocUrl": ".bread-crumbs li:nth-child(3) a@href"
+  },
+  "ruleToc": {
+    "chapterList": "li:has(a[href*='/book/'][href$='.html'])",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href##^/book/(\\d+)/(\\d+\\.html)$##https://m.xsw.tw/\\1/\\2"
+  },
+  "ruleContent": {
+    "content": "#nr1@html"
+  },
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "zh-CN,zh;q=0.9"
+  },
+  "id": "c7e4cb9d-f6d0-4504-a1e4-1c01935622f5",
+  "createdAt": "2026-06-23T17:00:00+00:00",
+  "updatedAt": "2026-06-24T02:20:00+00:00"
+}

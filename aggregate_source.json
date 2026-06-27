@@ -1,0 +1,34 @@
+{
+  "bookSourceName": "📚 聚合书源·Pro",
+  "bookSourceGroup": "聚合",
+  "bookSourceUrl": "http://your-server:8080",
+  "bookSourceType": 0,
+  "enabled": true,
+  "weight": 999,
+  "searchUrl": "http://your-server:8080/api/search?keyword={{key}}&page={{page}}",
+  "ruleSearch": {
+    "bookList": "$.data[*]",
+    "name": "$.data[*].name",
+    "author": "$.data[*].author",
+    "kind": "$.data[*].kind",
+    "lastChapter": "$.data[*].lastChapter",
+    "intro": "$.data[*].intro",
+    "coverUrl": "$.data[*].coverUrl",
+    "noteUrl": "$.data[*].noteUrl"
+  },
+  "ruleBookInfo": {
+    "name": "$.data.name",
+    "author": "$.data.author",
+    "intro": "$.data.intro",
+    "coverUrl": "$.data.coverUrl",
+    "tocUrl": "$.data.tocUrl"
+  },
+  "ruleToc": {
+    "chapterList": "$.data[*]",
+    "chapterName": "$.data[*].name",
+    "chapterUrl": "$.data[*].url"
+  },
+  "ruleContent": {
+    "content": "$.data.content"
+  }
+}

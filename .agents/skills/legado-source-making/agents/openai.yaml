@@ -1,0 +1,4 @@
+interface:
+  display_name: "Legado Source Making"
+  short_description: "制作、修复并验证项目内 Legado 子书源完整流程"
+  default_prompt: "Use $legado-source-making to create and validate a new Legado-compatible book source for this project."
