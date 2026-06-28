@@ -53,6 +53,7 @@ Desktop.ini
 backend/data/logs.db
 backend/data/logs.db-wal
 backend/data/logs.db-shm
+backend/data/sources/
 
 # ====== Docker ======
 docker-compose.override.yml
