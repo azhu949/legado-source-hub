@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.core.cache import cache
 from app.core.health_checker import health_checker
 from app.core.http_client import http_client
+from app.core.public_access import public_access_for_source_export, with_public_access_key
 from app.core.source_manager import source_manager
 from app.models.database import init_db
 from app.utils.public_url import get_public_origin
@@ -99,14 +100,21 @@ app.include_router(api_router)
 
 
 @app.get("/api/aggregate_source.json")
-async def get_aggregate_source(request: Request):
+async def get_aggregate_source(
+    request: Request,
+    public_access_key: str = Depends(public_access_for_source_export),
+):
     """对外聚合书源定义（供阅读 APP 直接导入）。"""
     host = get_public_origin(request)
+    import_url = with_public_access_key(f"{host.rstrip('/')}/api/aggregate_source.json", public_access_key)
     # Legado/阅读 APP 的网络导入入口按书源列表解析，即使只有一个书源也需要数组根节点。
-    return JSONResponse(content=[_build_public_book_source(host)])
+    return JSONResponse(
+        content=[_build_public_book_source(host, public_access_key)],
+        headers={"X-Aggregate-Source-Url": import_url},
+    )
 
 
-def _build_public_book_source(host: str) -> dict:
+def _build_public_book_source(host: str, public_access_key: str = "") -> dict:
     source = {
         "bookSourceName": "📚 聚合书源·Pro",
         "bookSourceGroup": "聚合",
@@ -122,7 +130,7 @@ def _build_public_book_source(host: str) -> dict:
         "enabledCookieJar": False,
         "jsLib": _build_public_source_js_lib(),
         "loginUi": _build_public_source_login_ui(),
-        "searchUrl": _build_public_source_search_url(),
+        "searchUrl": _build_public_source_search_url(public_access_key),
         "ruleSearch": {
             "bookList": "$.data[*]",
             "name": "$.name",
@@ -152,7 +160,7 @@ def _build_public_book_source(host: str) -> dict:
         },
         "ruleContent": {"content": "$.data.content"},
     }
-    explore_urls = _build_public_explore_urls(host)
+    explore_urls = _build_public_explore_urls(host, public_access_key)
     if explore_urls:
         source["enabledExplore"] = True
         source["exploreUrl"] = explore_urls
@@ -173,7 +181,7 @@ def _build_public_book_source(host: str) -> dict:
     return source
 
 
-def _build_public_explore_urls(host: str) -> list[str]:
+def _build_public_explore_urls(host: str, public_access_key: str = "") -> list[str]:
     entries: list[str] = []
     try:
         sources = source_manager.get_enabled_sources()
@@ -187,6 +195,8 @@ def _build_public_explore_urls(host: str) -> list[str]:
         for label, url in _iter_explore_entries(getattr(src, "exploreUrl", None)):
             display = f"{src.bookSourceName}/{label}" if label else src.bookSourceName
             params = urlencode({"url": url, "sourceId": src.id})
+            if public_access_key:
+                params = urlencode({"url": url, "sourceId": src.id, "accessKey": public_access_key})
             entries.append(f"{display}::{host.rstrip('/')}/api/explore?{params}")
     return entries
 
@@ -208,8 +218,9 @@ def _iter_explore_entries(explore_url) -> list[tuple[str, str]]:
     return [(label, url) for label, url in entries if url]
 
 
-def _build_public_source_search_url() -> str:
-    return """<js>
+def _build_public_source_search_url(public_access_key: str = "") -> str:
+    access_param = f"&{urlencode({'accessKey': public_access_key})}" if public_access_key else ""
+    template = """<js>
 const settings = aggSettings();
 let searchKey = String(key || '').trim();
 let sourceName = String(settings['搜索来源'] || '全部').trim();
@@ -221,8 +232,9 @@ if (atIndex > 0 && atIndex < searchKey.length - 1) {
 if (!sourceName) sourceName = '全部';
 const mode = String(settings['结果模式'] || '分源');
 const merge = mode === '聚合' || mode === '聚合去重' || mode === '1' ? '1' : '0';
-`${aggBaseUrl()}/api/search?keyword=${encodeURIComponent(searchKey)}&page=${page || 1}&merge=${merge}&source=${encodeURIComponent(sourceName)}`;
+`${aggBaseUrl()}/api/search?keyword=${encodeURIComponent(searchKey)}&page=${page || 1}&merge=${merge}&source=${encodeURIComponent(sourceName)}__ACCESS_PARAM__`;
 </js>"""
+    return template.replace("__ACCESS_PARAM__", access_param)
 
 
 def _build_public_source_js_lib() -> str:

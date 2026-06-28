@@ -5,6 +5,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import uuid4
 
 from app.config import get_settings
 
@@ -47,9 +48,22 @@ def init_db() -> None:
                 checked_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS access_users (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                access_key TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_logs_ts ON operation_logs(timestamp);
             CREATE INDEX IF NOT EXISTS idx_health_src ON health_records(source_id, checked_at);
             CREATE INDEX IF NOT EXISTS idx_health_checked ON health_records(checked_at);
+            CREATE INDEX IF NOT EXISTS idx_access_users_key ON access_users(access_key);
             """
         )
 
@@ -232,3 +246,140 @@ def get_health_overview() -> dict:
         "avg_latency_ms": avg_latency,
         "last_check": last_check,
     }
+
+
+# ---------------- 访问用户 ----------------
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _row_to_access_user(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    item["enabled"] = bool(item.get("enabled"))
+    return item
+
+
+def generate_access_key() -> str:
+    """Generate a URL-safe access key for public reading APIs."""
+    return uuid4().hex + uuid4().hex
+
+
+def list_access_users() -> list[dict]:
+    """List all reading-app access users."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM access_users ORDER BY created_at DESC"
+        ).fetchall()
+    return [_row_to_access_user(row) for row in rows]
+
+
+def create_access_user(name: str, note: str = "") -> dict:
+    """Create a reading-app access user with an individual key."""
+    ts = _now_iso()
+    user_id = uuid4().hex
+    access_key = generate_access_key()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO access_users "
+            "(id, name, access_key, enabled, note, request_count, created_at, updated_at) "
+            "VALUES (?, ?, ?, 1, ?, 0, ?, ?)",
+            (user_id, name, access_key, note, ts, ts),
+        )
+        row = conn.execute("SELECT * FROM access_users WHERE id = ?", (user_id,)).fetchone()
+    return _row_to_access_user(row)
+
+
+def get_access_user(user_id: str) -> Optional[dict]:
+    """Get a reading-app access user by id."""
+    with _get_conn() as conn:
+        row = conn.execute("SELECT * FROM access_users WHERE id = ?", (user_id,)).fetchone()
+    return _row_to_access_user(row) if row else None
+
+
+def get_enabled_access_user_by_key(access_key: str) -> Optional[dict]:
+    """Get an enabled access user by key."""
+    if not access_key:
+        return None
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM access_users WHERE access_key = ? AND enabled = 1",
+                (access_key,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return _row_to_access_user(row) if row else None
+
+
+def count_enabled_access_users() -> int:
+    """Return the number of enabled access users."""
+    try:
+        with _get_conn() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM access_users WHERE enabled = 1").fetchone()[0])
+    except sqlite3.OperationalError:
+        return 0
+
+
+def update_access_user(
+    user_id: str,
+    name: Optional[str] = None,
+    note: Optional[str] = None,
+    enabled: Optional[bool] = None,
+) -> Optional[dict]:
+    """Update access user fields."""
+    existing = get_access_user(user_id)
+    if not existing:
+        return None
+
+    next_name = existing["name"] if name is None else name
+    next_note = (existing.get("note") or "") if note is None else note
+    next_enabled = existing["enabled"] if enabled is None else enabled
+    ts = _now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE access_users SET name = ?, note = ?, enabled = ?, updated_at = ? WHERE id = ?",
+            (next_name, next_note, 1 if next_enabled else 0, ts, user_id),
+        )
+        row = conn.execute("SELECT * FROM access_users WHERE id = ?", (user_id,)).fetchone()
+    return _row_to_access_user(row)
+
+
+def rotate_access_user_key(user_id: str) -> Optional[dict]:
+    """Replace an access user's key."""
+    if not get_access_user(user_id):
+        return None
+    ts = _now_iso()
+    access_key = generate_access_key()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE access_users SET access_key = ?, updated_at = ? WHERE id = ?",
+            (access_key, ts, user_id),
+        )
+        row = conn.execute("SELECT * FROM access_users WHERE id = ?", (user_id,)).fetchone()
+    return _row_to_access_user(row)
+
+
+def delete_access_user(user_id: str) -> bool:
+    """Delete an access user."""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM access_users WHERE id = ?", (user_id,))
+    return cur.rowcount > 0
+
+
+def record_access_user_usage(access_key: str) -> None:
+    """Record public API usage for an access key."""
+    if not access_key:
+        return
+    ts = _now_iso()
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE access_users "
+                "SET request_count = request_count + 1, last_used_at = ? "
+                "WHERE access_key = ? AND enabled = 1",
+                (ts, access_key),
+            )
+    except sqlite3.OperationalError:
+        return

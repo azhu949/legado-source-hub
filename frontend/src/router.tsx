@@ -1,6 +1,6 @@
 /** 路由配置。 */
 
-import { createBrowserRouter, type RouteObject } from "react-router-dom"
+import { Navigate, createBrowserRouter } from "react-router-dom"
 import { AdminLayout } from "@/components/layout/AdminLayout"
 import LoginPage from "@/pages/LoginPage"
 import DashboardPage from "@/pages/DashboardPage"
@@ -28,6 +28,7 @@ export const router = createBrowserRouter([
       { path: "sources/new", element: <SourceEditPage /> },
       { path: "sources/:id/edit", element: <SourceEditPage /> },
       { path: "sources/import", element: <SourceImportPage /> },
+      { path: "users", element: <Navigate to="/admin/aggregate" replace /> },
       { path: "rules/test", element: <RuleTestPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "cache", element: <CachePage /> },

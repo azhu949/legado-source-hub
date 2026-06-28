@@ -6,12 +6,13 @@ import logging
 import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from app.core.aggregator import Aggregator
 from app.core.cache import cache
 from app.core.legado import build_search_request, execute_request, response_is_json
 from app.core.http_client import http_client
+from app.core.public_access import require_public_access, with_query_params
 from app.core.rule_engine import RuleEngine
 from app.core.source_manager import source_manager
 from app.models.responses import success, error
@@ -37,6 +38,7 @@ async def search(
     source_id: str | None = Query(None, alias="sourceId", description="限定子书源ID"),
     source_filter: str | None = Query(None, alias="source", description="限定子书源名称或ID，多个用英文逗号分隔"),
     merge: int = Query(0, ge=0, le=1, description="是否聚合去重：0分源候选，1聚合去重"),
+    public_access_key: str = Depends(require_public_access),
 ):
     """搜索：默认返回分源候选；merge=1 时聚合去重。"""
     # 记录搜索量
@@ -61,7 +63,7 @@ async def search(
     cached = await cache.get_search(keyword, page, source_scope=source_scope, merge=merge)
     if cached is not None:
         _log_search_cache_hit(keyword, page, merge, cached)
-        return success(data=_proxify_search_results(cached, get_public_origin(request)))
+        return success(data=_proxify_search_results(cached, get_public_origin(request), public_access_key))
 
     logger.info(
         "开始搜索 keyword=%r page=%s merge=%s sourceId=%s source=%r selected=%s",
@@ -141,7 +143,7 @@ async def search(
 
     # 写缓存
     await cache.set_search(keyword, page, books, source_scope=source_scope, merge=merge)
-    return success(data=_proxify_search_results(books, get_public_origin(request)))
+    return success(data=_proxify_search_results(books, get_public_origin(request), public_access_key))
 
 
 @router.get("/explore")
@@ -150,6 +152,7 @@ async def explore(
     url: str = Query("", description="源站发现/分类页URL"),
     source_id: str | None = Query(None, alias="sourceId", description="限定子书源ID"),
     source_filter: str | None = Query(None, alias="source", description="限定子书源名称或ID"),
+    public_access_key: str = Depends(require_public_access),
 ):
     """发现/分类：从子书源的 exploreUrl + ruleExplore 提取书籍列表。"""
     source = _find_source_by_url(url, source_id) if url else None
@@ -188,11 +191,17 @@ async def explore(
     next_url = ""
     if isinstance(extracted, dict) and extracted.get("nextUrl"):
         next_url = resolve_relative_url(target_url, extracted["nextUrl"])
-        next_url = _proxy_api_url(get_public_origin(request), "/api/explore", next_url, source_id=source.id)
+        next_url = _proxy_api_url(
+            get_public_origin(request),
+            "/api/explore",
+            next_url,
+            source_id=source.id,
+            access_key=public_access_key,
+        )
 
     return success(
         data={
-            "books": _proxify_search_results(books, get_public_origin(request)),
+            "books": _proxify_search_results(books, get_public_origin(request), public_access_key),
             "nextUrl": next_url,
         }
     )
@@ -203,6 +212,7 @@ async def get_book_info(
     request: Request,
     url: str = Query(..., description="源站书籍页URL"),
     source_id: str | None = Query(None, alias="sourceId", description="限定子书源ID"),
+    public_access_key: str = Depends(require_public_access),
 ):
     """书籍详情：从对应源站获取详情信息。"""
     source_hint = source_id or _source_id_from_url(url)
@@ -211,7 +221,7 @@ async def get_book_info(
     if cached is not None:
         if source_id and isinstance(cached, dict):
             cached = {**cached, "sourceId": source_id}
-        return success(data=_proxify_book_info(cached, get_public_origin(request)))
+        return success(data=_proxify_book_info(cached, get_public_origin(request), public_access_key))
 
     source = _find_source_by_url(url, source_id)
     if not source:
@@ -237,7 +247,7 @@ async def get_book_info(
         info["sourceName"] = source.bookSourceName
 
     await cache.set_book(url_hash, info)
-    return success(data=_proxify_book_info(info, get_public_origin(request)))
+    return success(data=_proxify_book_info(info, get_public_origin(request), public_access_key))
 
 
 @router.get("/toc")
@@ -245,13 +255,14 @@ async def get_toc(
     request: Request,
     url: str = Query(..., description="源站目录页URL"),
     source_id: str | None = Query(None, alias="sourceId", description="限定子书源ID"),
+    public_access_key: str = Depends(require_public_access),
 ):
     """章节目录：从源站获取章节列表。"""
     source_hint = source_id or _source_id_from_url(url)
     url_hash = hashlib.md5(f"{_TOC_CACHE_VERSION}:{source_hint}:{url}".encode()).hexdigest()
     cached = await cache.get_toc(url_hash)
     if cached is not None:
-        return success(data=_proxify_toc_chapters(cached, get_public_origin(request), source_id=source_id))
+        return success(data=_proxify_toc_chapters(cached, get_public_origin(request), source_id=source_id, access_key=public_access_key))
 
     source = _find_source_by_url(url, source_id)
     if not source:
@@ -265,13 +276,14 @@ async def get_toc(
 
     if chapters:
         await cache.set_toc(url_hash, chapters)
-    return success(data=_proxify_toc_chapters(chapters, get_public_origin(request), source_id=source.id))
+    return success(data=_proxify_toc_chapters(chapters, get_public_origin(request), source_id=source.id, access_key=public_access_key))
 
 
 @router.get("/content")
 async def get_content(
     url: str = Query(..., description="源站章节页URL"),
     source_id: str | None = Query(None, alias="sourceId", description="限定子书源ID"),
+    _public_access_key: str = Depends(require_public_access),
 ):
     """章节正文：从源站获取正文内容。"""
     source = _find_source_by_url(url, source_id)
@@ -786,7 +798,7 @@ def _normalize_toc_chapters(chapters: list[dict], base_url: str) -> list[dict]:
     return normalized
 
 
-def _proxify_search_results(books: list[dict], public_origin: str) -> list[dict]:
+def _proxify_search_results(books: list[dict], public_origin: str, access_key: str = "") -> list[dict]:
     """Return search results whose detail URLs point back to the aggregator API."""
     proxied: list[dict] = []
     for book in books or []:
@@ -798,13 +810,25 @@ def _proxify_search_results(books: list[dict], public_origin: str) -> list[dict]
         source_id = str(item.get("sourceId") or "").strip()
         detail_url = str(item.get("noteUrl") or item.get("bookUrl") or "").strip()
         if detail_url:
-            proxied_detail = _proxy_api_url(public_origin, "/api/book", detail_url, source_id=source_id)
+            proxied_detail = _proxy_api_url(
+                public_origin,
+                "/api/book",
+                detail_url,
+                source_id=source_id,
+                access_key=access_key,
+            )
             item["noteUrl"] = proxied_detail
             item["bookUrl"] = proxied_detail
 
         toc_url = str(item.get("tocUrl") or "").strip()
         if toc_url:
-            item["tocUrl"] = _proxy_api_url(public_origin, "/api/toc", toc_url, source_id=source_id)
+            item["tocUrl"] = _proxy_api_url(
+                public_origin,
+                "/api/toc",
+                toc_url,
+                source_id=source_id,
+                access_key=access_key,
+            )
 
         proxied.append(item)
     return proxied
@@ -884,7 +908,7 @@ def _unproxy_source_url(url: str, api_path: str) -> str:
     return values[0] if values else url
 
 
-def _proxify_book_info(info: dict, public_origin: str) -> dict:
+def _proxify_book_info(info: dict, public_origin: str, access_key: str = "") -> dict:
     """Return book info whose toc URL points back to the aggregator API."""
     if not isinstance(info, dict):
         return info
@@ -893,7 +917,13 @@ def _proxify_book_info(info: dict, public_origin: str) -> dict:
     source_id = str(item.get("sourceId") or "").strip()
     toc_url = str(item.get("tocUrl") or "").strip()
     if toc_url:
-        item["tocUrl"] = _proxy_api_url(public_origin, "/api/toc", toc_url, source_id=source_id)
+        item["tocUrl"] = _proxy_api_url(
+            public_origin,
+            "/api/toc",
+            toc_url,
+            source_id=source_id,
+            access_key=access_key,
+        )
     return item
 
 
@@ -901,6 +931,7 @@ def _proxify_toc_chapters(
     chapters: list[dict],
     public_origin: str,
     source_id: str | None = None,
+    access_key: str = "",
 ) -> list[dict]:
     """Return chapters whose content URLs point back to the aggregator API."""
     proxied: list[dict] = []
@@ -916,6 +947,7 @@ def _proxify_toc_chapters(
                 "/api/content",
                 chapter_url,
                 source_id=item_source_id,
+                access_key=access_key,
             )
             item["url"] = proxied_content
             item["chapterUrl"] = proxied_content
@@ -928,19 +960,19 @@ def _proxy_api_url(
     api_path: str,
     source_url: str,
     source_id: str | None = None,
+    access_key: str = "",
 ) -> str:
     """Build a public API URL while avoiding double-proxying cached values."""
     source_url = str(source_url or "").strip()
     if not source_url:
         return ""
     if _is_proxy_api_url(source_url, api_path):
-        if source_id and "sourceId=" not in source_url:
-            separator = "&" if urlparse(source_url).query else "?"
-            return f"{source_url}{separator}{urlencode({'sourceId': source_id})}"
-        return source_url
+        return with_query_params(source_url, {"sourceId": source_id or "", "accessKey": access_key})
     params = {"url": source_url}
     if source_id:
         params["sourceId"] = source_id
+    if access_key:
+        params["accessKey"] = access_key
     return f"{public_origin.rstrip('/')}{api_path}?{urlencode(params)}"
 
 

@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button"
 import { getStats, getRecentLogs } from "@/api/logs"
 import { triggerHealthCheck } from "@/api/health"
 import type { DashboardStats, LogEntry } from "@/api/logs"
-import { copyText, getAggregateSourceUrl } from "@/lib/aggregateSource"
 import { formatDate } from "@/lib/utils"
 import {
   BookOpen,
@@ -15,8 +14,6 @@ import {
   AlertTriangle,
   Clock,
   RefreshCw,
-  Copy,
-  ExternalLink,
   FileJson,
   ArrowRight,
 } from "lucide-react"
@@ -26,7 +23,6 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [checking, setChecking] = useState(false)
-  const aggregateSourceUrl = getAggregateSourceUrl()
 
   useEffect(() => {
     loadData()
@@ -52,15 +48,6 @@ export default function DashboardPage() {
       toast.error("触发检查失败")
     } finally {
       setChecking(false)
-    }
-  }
-
-  const handleCopyAggregateUrl = async () => {
-    try {
-      await copyText(aggregateSourceUrl)
-      toast.success("聚合书源地址已复制")
-    } catch {
-      toast.error("复制失败，请手动复制地址")
     }
   }
 
@@ -118,29 +105,17 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={handleCopyAggregateUrl}>
-              <Copy className="h-4 w-4" />
-              复制
-            </Button>
-            <Button variant="outline" size="sm" asChild>
+            <Button size="sm" asChild>
               <Link to="/admin/aggregate">
                 <ArrowRight className="h-4 w-4" />
-                详情
+                管理导入地址
               </Link>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => window.open(aggregateSourceUrl, "_blank", "noopener,noreferrer")}
-            >
-              <ExternalLink className="h-4 w-4" />
-              打开 JSON
             </Button>
           </div>
         </CardHeader>
         <CardContent>
           <div className="rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm text-foreground break-all">
-            {aggregateSourceUrl}
+            在「聚合书源」中创建访问用户，并复制对应的阅读 APP 导入地址
           </div>
         </CardContent>
       </Card>

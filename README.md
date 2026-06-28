@@ -39,8 +39,7 @@ docker compose up -d
 
 # 4. 访问
 #    管理后台:  http://localhost:8080/admin
-#    聚合API:   http://localhost:8080/api/search?keyword=测试
-#    聚合书源:  http://localhost:8080/api/aggregate_source.json
+#    聚合书源:  登录后台后在「聚合书源」页创建访问用户并复制导入地址
 ```
 
 默认管理员账号：`admin` / `admin123`（请务必在 `.env` 中修改）。
@@ -75,12 +74,12 @@ npm run dev
 
 ### 1. 导入聚合书源到阅读 APP
 
-在管理后台左侧进入「聚合书源」，复制导入地址或 JSON 后导入阅读 APP。搜索时，系统会自动并发所有已配置的子书源并聚合返回。
+在管理后台左侧进入「聚合书源」，为阅读设备创建访问用户并复制该用户的导入地址。搜索时，系统会自动并发所有已配置的子书源并聚合返回。
 
 ### 2. 管理后台
 
 - **仪表盘**：查看书源总数、搜索量、异常数、平均延迟
-- **聚合书源**：查看并复制阅读 APP 导入地址和 JSON
+- **聚合书源**：为不同阅读设备或使用者生成独立导入地址，可单独禁用、删除、重置口令，并查看对应 JSON
 - **书源管理**：新增 / 编辑 / 启禁用 / 删除子书源，支持批量导入（粘贴JSON / 上传文件 / 远程URL）
 - **规则测试**：填入 URL 和规则，实时查看源站响应与提取结果
 - **健康监控**：查看各书源可用性与响应延迟趋势
@@ -131,16 +130,19 @@ book-aggregator/
 ```bash
 cd backend
 pip install pytest
-pytest tests/ -v
+pytest tests/public -v
 ```
+
+含真实站点的验证用例只放本地 `backend/tests/private/`，该目录已被 Git 忽略。
 
 ## 🔒 安全建议
 
 1. 生产环境务必修改 `ADMIN_PASS` 和 `SECRET_KEY`
-2. Nginx 层配置 HTTPS（Let's Encrypt）
-3. 管理后台路径可加 IP 白名单
-4. Redis 建议配置密码认证
-5. 定期备份 Docker 部署数据（如 `docker cp novl-backend-1:/app/data ./backup-data`）
+2. 公网部署建议在后台创建访问用户，只把带用户 key 的导入地址发给自己的阅读 APP；泄露后重置或禁用该用户即可失效
+3. Nginx 层配置 HTTPS（Let's Encrypt）
+4. 管理后台路径可加 IP 白名单
+5. Redis 建议配置密码认证
+6. 定期备份 Docker 部署数据（如 `docker cp novl-backend-1:/app/data ./backup-data`）
 
 ## 📄 License
 
