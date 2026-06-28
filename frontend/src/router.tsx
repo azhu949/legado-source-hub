@@ -10,6 +10,7 @@ import SourceEditPage from "@/pages/sources/SourceEditPage"
 import SourceImportPage from "@/pages/sources/SourceImportPage"
 import RuleTestPage from "@/pages/RuleTestPage"
 import HealthPage from "@/pages/HealthPage"
+import CachePage from "@/pages/CachePage"
 import LogsPage from "@/pages/LogsPage"
 
 export const router = createBrowserRouter([
@@ -29,6 +30,7 @@ export const router = createBrowserRouter([
       { path: "sources/import", element: <SourceImportPage /> },
       { path: "rules/test", element: <RuleTestPage /> },
       { path: "health", element: <HealthPage /> },
+      { path: "cache", element: <CachePage /> },
       { path: "logs", element: <LogsPage /> },
     ],
   },

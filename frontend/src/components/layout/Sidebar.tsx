@@ -7,6 +7,7 @@ import {
   BookOpen,
   FlaskConical,
   Activity,
+  Database,
   ScrollText,
   LogOut,
   Library,
@@ -22,6 +23,7 @@ const navItems = [
   { label: "书源管理", path: "/admin/sources", icon: BookOpen },
   { label: "规则测试", path: "/admin/rules/test", icon: FlaskConical },
   { label: "健康监控", path: "/admin/health", icon: Activity },
+  { label: "缓存管理", path: "/admin/cache", icon: Database },
   { label: "操作日志", path: "/admin/logs", icon: ScrollText },
 ]
 

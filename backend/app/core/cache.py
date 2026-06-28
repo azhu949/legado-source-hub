@@ -87,15 +87,31 @@ class Cache:
         except Exception as e:  # noqa: BLE001
             logger.debug("缓存删除失败 key=%s err=%s", key, e)
 
-    async def delete_pattern(self, pattern: str) -> None:
+    async def delete_pattern(self, pattern: str) -> int:
         """按模式删除缓存（书源更新时失效相关缓存）。"""
         if not self.available or not self._redis:
-            return
+            return 0
         try:
+            deleted = 0
             async for key in self._redis.scan_iter(match=pattern, count=100):
-                await self._redis.delete(key)
+                deleted += await self._redis.delete(key)
+            return deleted
         except Exception as e:  # noqa: BLE001
             logger.debug("缓存批量删除失败 pattern=%s err=%s", pattern, e)
+            return 0
+
+    async def count_pattern(self, pattern: str) -> int:
+        """统计匹配模式的缓存键数量。"""
+        if not self.available or not self._redis:
+            return 0
+        try:
+            count = 0
+            async for _key in self._redis.scan_iter(match=pattern, count=100):
+                count += 1
+            return count
+        except Exception as e:  # noqa: BLE001
+            logger.debug("缓存统计失败 pattern=%s err=%s", pattern, e)
+            return 0
 
     async def incr(self, key: str, ttl: int = 86400) -> int:
         """自增计数（用于搜索量统计）。"""
