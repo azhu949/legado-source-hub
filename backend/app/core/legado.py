@@ -73,6 +73,8 @@ def normalize_source_dict(data: Any) -> Any:
 
     if "ruleSearch" in normalized:
         normalized["ruleSearch"] = normalize_rule_aliases(normalized["ruleSearch"])
+    if "ruleExplore" in normalized:
+        normalized["ruleExplore"] = normalize_rule_aliases(normalized["ruleExplore"])
 
     return normalized
 

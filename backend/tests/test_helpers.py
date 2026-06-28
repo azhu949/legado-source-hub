@@ -2,6 +2,7 @@
 
 from app.utils.helpers import (
     book_fingerprint,
+    normalize_author,
     is_same_book,
     normalize_title,
     build_search_url,
@@ -38,6 +39,12 @@ def test_normalize_title():
     assert normalize_title("《斗破苍穹》") == "斗破苍穹"
     assert normalize_title(" 斗破苍穹 ") == "斗破苍穹"
     assert normalize_title("斗破苍穹(全本)") == "斗破苍穹"
+
+
+def test_normalize_chinese_variants():
+    assert normalize_title("《鬥破蒼穹》") == normalize_title("斗破苍穹")
+    assert normalize_title("凡人修仙傳") == normalize_title("凡人修仙传")
+    assert normalize_author("辰東") == normalize_author("辰东")
 
 
 def test_build_search_url():

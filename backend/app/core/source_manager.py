@@ -12,6 +12,7 @@ from app.core.legado import normalize_rule_aliases, parse_headers
 from app.models.source import BookSource
 
 logger = logging.getLogger(__name__)
+_SYSTEM_FIELDS = {"id", "createdAt", "updatedAt"}
 
 
 class SourceManager:
@@ -122,6 +123,7 @@ class SourceManager:
         """新增书源。"""
         if not self._loaded:
             self.load_all()
+        data = self._strip_system_fields(data)
         source = BookSource(**data)
         self._save_to_file(source)
         self._cache[source.id] = source
@@ -136,12 +138,15 @@ class SourceManager:
         if not existing:
             return None
 
-        # 保留系统字段
-        data["id"] = source_id
-        data["createdAt"] = existing.createdAt
-        data["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        merged = existing.model_dump()
+        merged.update(data)
 
-        source = BookSource(**data)
+        # 保留系统字段
+        merged["id"] = source_id
+        merged["createdAt"] = existing.createdAt
+        merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+        source = BookSource(**merged)
         self._save_to_file(source)
         self._cache[source.id] = source
         logger.info("更新书源: %s (%s)", source.bookSourceName, source.id)
@@ -153,7 +158,7 @@ class SourceManager:
             self.load_all()
         if source_id not in self._cache:
             return False
-        path = self.settings.SOURCES_DIR / f"{source_id}.json"
+        path = self._source_file_path(source_id)
         if path.exists():
             path.unlink()
         name = self._cache[source_id].bookSourceName
@@ -233,9 +238,24 @@ class SourceManager:
 
     def _save_to_file(self, source: BookSource) -> None:
         """将书源保存为 JSON 文件。"""
-        path = self.settings.SOURCES_DIR / f"{source.id}.json"
+        path = self._source_file_path(source.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(source.model_dump(), f, ensure_ascii=False, indent=2)
+
+    def _source_file_path(self, source_id: str) -> Path:
+        """Return a storage path guaranteed to stay inside SOURCES_DIR."""
+        filename = f"{source_id}.json"
+        path = self.settings.SOURCES_DIR / filename
+        base = self.settings.SOURCES_DIR.resolve()
+        resolved = path.resolve()
+        if Path(filename).name != filename or resolved.parent != base:
+            raise ValueError("非法书源ID")
+        return path
+
+    def _strip_system_fields(self, data: dict) -> dict:
+        """Drop fields owned by storage rather than user-provided source config."""
+        return {key: value for key, value in dict(data).items() if key not in _SYSTEM_FIELDS}
 
     def _find_by_name(self, name: str) -> Optional[BookSource]:
         """按名称查找书源。"""
@@ -252,19 +272,23 @@ class SourceManager:
         if not raw.get("bookSourceUrl"):
             raise ValueError("书源URL不能为空")
 
-        normalized = {
-            "bookSourceName": raw.get("bookSourceName", "").strip(),
-            "bookSourceGroup": raw.get("bookSourceGroup", "未分组") or "未分组",
-            "bookSourceUrl": raw.get("bookSourceUrl", "").strip(),
-            "enabled": raw.get("enabled", True) if isinstance(raw.get("enabled"), bool) else True,
-            "weight": int(raw.get("weight", 100) or 100),
-            "searchUrl": raw.get("searchUrl", ""),
-            "ruleSearch": normalize_rule_aliases(raw.get("ruleSearch") or {}),
-            "ruleBookInfo": raw.get("ruleBookInfo") or {},
-            "ruleToc": raw.get("ruleToc") or {},
-            "ruleContent": raw.get("ruleContent") or {},
-            "headers": parse_headers(raw.get("headers") if "headers" in raw else raw.get("header")),
-        }
+        normalized = dict(raw)
+        normalized.update(
+            {
+                "bookSourceName": str(raw.get("bookSourceName", "")).strip(),
+                "bookSourceGroup": raw.get("bookSourceGroup", "未分组") or "未分组",
+                "bookSourceUrl": str(raw.get("bookSourceUrl", "")).strip(),
+                "enabled": raw.get("enabled", True) if isinstance(raw.get("enabled"), bool) else True,
+                "weight": int(raw.get("weight", 100) or 100),
+                "searchUrl": raw.get("searchUrl", ""),
+                "ruleSearch": normalize_rule_aliases(raw.get("ruleSearch") or {}),
+                "ruleBookInfo": raw.get("ruleBookInfo") or {},
+                "ruleToc": raw.get("ruleToc") or {},
+                "ruleContent": raw.get("ruleContent") or {},
+                "ruleExplore": normalize_rule_aliases(raw.get("ruleExplore") or {}),
+                "headers": parse_headers(raw.get("headers") if "headers" in raw else raw.get("header")),
+            }
+        )
         return normalized
 
 

@@ -3,6 +3,7 @@
 import json
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,7 +88,7 @@ async def get_aggregate_source(request: Request):
 
 
 def _build_public_book_source(host: str) -> dict:
-    return {
+    source = {
         "bookSourceName": "📚 聚合书源·Pro",
         "bookSourceGroup": "聚合",
         "bookSourceComment": (
@@ -132,6 +133,60 @@ def _build_public_book_source(host: str) -> dict:
         },
         "ruleContent": {"content": "$.data.content"},
     }
+    explore_urls = _build_public_explore_urls(host)
+    if explore_urls:
+        source["enabledExplore"] = True
+        source["exploreUrl"] = explore_urls
+        source["ruleExplore"] = {
+            "bookList": "$.data.books[*]",
+            "name": "$.name",
+            "author": "$.author",
+            "kind": "$.kind",
+            "lastChapter": "$.lastChapter",
+            "intro": "$.intro",
+            "coverUrl": "$.coverUrl",
+            "noteUrl": "$.noteUrl",
+            "bookUrl": "$.bookUrl",
+            "tocUrl": "$.tocUrl",
+            "wordCount": "$.wordCount",
+            "nextUrl": "$.data.nextUrl",
+        }
+    return source
+
+
+def _build_public_explore_urls(host: str) -> list[str]:
+    entries: list[str] = []
+    try:
+        sources = source_manager.get_enabled_sources()
+    except Exception:  # noqa: BLE001
+        return entries
+
+    for src in sources:
+        rule_explore = getattr(src, "ruleExplore", None)
+        if not getattr(src, "enabledExplore", False) or not getattr(rule_explore, "bookList", ""):
+            continue
+        for label, url in _iter_explore_entries(getattr(src, "exploreUrl", None)):
+            display = f"{src.bookSourceName}/{label}" if label else src.bookSourceName
+            params = urlencode({"url": url, "sourceId": src.id})
+            entries.append(f"{display}::{host.rstrip('/')}/api/explore?{params}")
+    return entries
+
+
+def _iter_explore_entries(explore_url) -> list[tuple[str, str]]:
+    values: list[str] = []
+    if isinstance(explore_url, list):
+        values = [str(item) for item in explore_url]
+    elif isinstance(explore_url, str):
+        values = [item.strip() for item in explore_url.splitlines() if item.strip()]
+
+    entries: list[tuple[str, str]] = []
+    for item in values:
+        label, separator, url = item.partition("::")
+        if separator:
+            entries.append((label.strip(), url.strip()))
+        else:
+            entries.append(("", item.strip()))
+    return [(label, url) for label, url in entries if url]
 
 
 def _build_public_source_search_url() -> str:

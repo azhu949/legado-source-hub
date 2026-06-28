@@ -14,11 +14,16 @@ from app.core.http_client import http_client
 from app.core.rule_engine import RuleEngine
 from app.core.source_manager import source_manager
 from app.models.responses import success, error
-from app.utils.helpers import resolve_relative_url
+from app.utils.helpers import normalize_author, normalize_title, resolve_relative_url, similarity
 from app.utils.public_url import get_public_origin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["public"])
+_MAX_TOC_PAGES = 20
+_MAX_CONTENT_PAGES = 20
+_SEARCH_CACHE_VERSION = "rel3"
+_TITLE_SIMILARITY_THRESHOLD = 0.82
+_AUTHOR_SIMILARITY_THRESHOLD = 0.86
 
 
 @router.get("/search")
@@ -37,6 +42,7 @@ async def search(
     keyword, quick_source = _split_keyword_source(keyword)
     source_filter = source_filter or quick_source
     sources = _select_sources(source_id=source_id, source_filter=source_filter)
+    sources = [source for source in sources if _source_search_enabled(source)]
     if not sources:
         return success(data=[])
 
@@ -62,14 +68,11 @@ async def search(
                 rules = src.ruleSearch.model_dump()
                 extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json)
                 books = extracted.get("bookList", []) if isinstance(extracted, dict) else []
-                # 补充 noteUrl 为绝对地址
+                books = _filter_search_books(books, keyword)
                 for book in books:
                     book["sourceId"] = src.id
                     book["sourceName"] = src.bookSourceName
-                    if book.get("noteUrl"):
-                        book["noteUrl"] = resolve_relative_url(src.bookSourceUrl, book["noteUrl"])
-                    if book.get("coverUrl"):
-                        book["coverUrl"] = resolve_relative_url(src.bookSourceUrl, book["coverUrl"])
+                    _normalize_book_result_urls(book, src.bookSourceUrl)
                 return src.id, src.weight, books
             except Exception as e:  # noqa: BLE001
                 logger.debug("书源 %s 搜索提取失败: %s", src.bookSourceName, e)
@@ -87,6 +90,59 @@ async def search(
     # 写缓存
     await cache.set_search(keyword, page, books, source_scope=source_scope, merge=merge)
     return success(data=_proxify_search_results(books, get_public_origin(request)))
+
+
+@router.get("/explore")
+async def explore(
+    request: Request,
+    url: str = Query("", description="源站发现/分类页URL"),
+    source_id: str | None = Query(None, alias="sourceId", description="限定子书源ID"),
+    source_filter: str | None = Query(None, alias="source", description="限定子书源名称或ID"),
+):
+    """发现/分类：从子书源的 exploreUrl + ruleExplore 提取书籍列表。"""
+    source = _find_source_by_url(url, source_id) if url else None
+    if not source:
+        candidates = _select_sources(source_id=source_id, source_filter=source_filter)
+        source = next((src for src in candidates if _source_has_explore(src)), None)
+    if not source:
+        return error("NOT_FOUND", "未找到匹配的书源")
+    if not _source_has_explore(source):
+        return success(data={"books": [], "nextUrl": ""})
+
+    target_url = url or _first_explore_url(source)
+    if not target_url:
+        return success(data={"books": [], "nextUrl": ""})
+
+    resp = await http_client.get(target_url, headers=source.headers or {})
+    if resp["status"] != 200:
+        return error("FETCH_FAILED", f"源站请求失败: HTTP {resp['status']}")
+
+    extracted = RuleEngine.apply_rules(
+        resp["body"],
+        source.ruleExplore.model_dump(),
+        is_json=response_is_json(resp),
+    )
+    books = extracted.get("bookList", []) if isinstance(extracted, dict) else []
+    if isinstance(books, dict):
+        books = [books]
+    for book in books:
+        if not isinstance(book, dict):
+            continue
+        book["sourceId"] = source.id
+        book["sourceName"] = source.bookSourceName
+        _normalize_book_result_urls(book, target_url)
+
+    next_url = ""
+    if isinstance(extracted, dict) and extracted.get("nextUrl"):
+        next_url = resolve_relative_url(target_url, extracted["nextUrl"])
+        next_url = _proxy_api_url(get_public_origin(request), "/api/explore", next_url, source_id=source.id)
+
+    return success(
+        data={
+            "books": _proxify_search_results(books, get_public_origin(request)),
+            "nextUrl": next_url,
+        }
+    )
 
 
 @router.get("/book")
@@ -112,13 +168,15 @@ async def get_book_info(
     if resp["status"] != 200:
         return error("FETCH_FAILED", f"源站请求失败: HTTP {resp['status']}")
 
-    is_json = "json" in resp.get("headers", {}).get("Content-Type", "").lower()
+    is_json = response_is_json(resp)
     rules = source.ruleBookInfo.model_dump()
     info = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json)
 
     # 解析 tocUrl 为绝对地址
     if isinstance(info, dict) and info.get("tocUrl"):
         info["tocUrl"] = resolve_relative_url(url, info["tocUrl"])
+    elif isinstance(info, dict) and getattr(source.ruleToc, "chapterList", ""):
+        info["tocUrl"] = url
     if isinstance(info, dict) and info.get("coverUrl"):
         info["coverUrl"] = resolve_relative_url(url, info["coverUrl"])
     if isinstance(info, dict):
@@ -146,16 +204,10 @@ async def get_toc(
     if not source:
         return error("NOT_FOUND", "未找到匹配的书源")
 
-    resp = await http_client.get(url, headers=source.headers or {})
-    if resp["status"] != 200:
-        return error("FETCH_FAILED", f"源站请求失败: HTTP {resp['status']}")
+    chapters, failed_status = await _collect_toc_chapters(source, url)
+    if failed_status is not None:
+        return error("FETCH_FAILED", f"源站请求失败: HTTP {failed_status}")
 
-    is_json = "json" in resp.get("headers", {}).get("Content-Type", "").lower()
-    rules = source.ruleToc.model_dump()
-    extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json)
-    chapters = extracted.get("chapterList", []) if isinstance(extracted, dict) else []
-
-    chapters = _normalize_toc_chapters(chapters, url)
     chapters = Aggregator.aggregate_toc_results(chapters)
 
     await cache.set_toc(url_hash, chapters)
@@ -172,14 +224,9 @@ async def get_content(
     if not source:
         return error("NOT_FOUND", "未找到匹配的书源")
 
-    resp = await http_client.get(url, headers=source.headers or {})
-    if resp["status"] != 200:
-        return error("FETCH_FAILED", f"源站请求失败: HTTP {resp['status']}")
-
-    is_json = "json" in resp.get("headers", {}).get("Content-Type", "").lower()
-    rules = source.ruleContent.model_dump()
-    extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json)
-    content = extracted.get("content", "") if isinstance(extracted, dict) else ""
+    content, failed_status = await _collect_content_pages(source, url)
+    if failed_status is not None:
+        return error("FETCH_FAILED", f"源站请求失败: HTTP {failed_status}")
     return success(data={"content": content})
 
 
@@ -187,6 +234,194 @@ async def get_content(
 async def health():
     """服务存活检查。"""
     return success(data={"status": "ok"})
+
+
+async def _collect_toc_chapters(source, start_url: str) -> tuple[list[dict], int | None]:
+    """Collect toc chapters, following ``ruleToc.nextTocUrl`` when present."""
+    chapters: list[dict] = []
+    current_url = start_url
+    seen: set[str] = set()
+    rules = source.ruleToc.model_dump()
+
+    for _ in range(_MAX_TOC_PAGES):
+        if not current_url or current_url in seen:
+            break
+        seen.add(current_url)
+
+        resp = await http_client.get(current_url, headers=source.headers or {})
+        if resp["status"] != 200:
+            return chapters, resp["status"] if not chapters else None
+
+        extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=response_is_json(resp))
+        page_chapters = extracted.get("chapterList", []) if isinstance(extracted, dict) else []
+        if isinstance(page_chapters, dict):
+            page_chapters = [page_chapters]
+        chapters.extend(_normalize_toc_chapters(page_chapters, current_url))
+
+        next_url = str(extracted.get("nextTocUrl") or "").strip() if isinstance(extracted, dict) else ""
+        if not next_url:
+            break
+        current_url = resolve_relative_url(current_url, next_url)
+
+    return chapters, None
+
+
+async def _collect_content_pages(source, start_url: str) -> tuple[str, int | None]:
+    """Collect chapter content, following ``ruleContent.nextContentUrl`` when present."""
+    parts: list[str] = []
+    current_url = start_url
+    seen: set[str] = set()
+    rules = source.ruleContent.model_dump()
+    follow_next_content = _should_follow_next_content_url(rules.get("nextContentUrl"))
+
+    for _ in range(_MAX_CONTENT_PAGES):
+        if not current_url or current_url in seen:
+            break
+        seen.add(current_url)
+
+        resp = await http_client.get(current_url, headers=source.headers or {})
+        if resp["status"] != 200:
+            return "\n".join(parts), resp["status"] if not parts else None
+
+        extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=response_is_json(resp))
+        content = _content_value_to_text(extracted.get("content", "") if isinstance(extracted, dict) else "")
+        if content:
+            parts.append(content)
+
+        next_url = str(extracted.get("nextContentUrl") or "").strip() if isinstance(extracted, dict) else ""
+        if not next_url or not follow_next_content:
+            break
+        current_url = resolve_relative_url(current_url, next_url)
+
+    return "\n".join(parts), None
+
+
+def _should_follow_next_content_url(rule) -> bool:
+    text = str(rule or "").lower()
+    chapter_markers = ("下一章", "下一回", "下一节", "next chapter")
+    return bool(text.strip()) and not any(marker in text for marker in chapter_markers)
+
+
+def _content_value_to_text(value) -> str:
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if str(item).strip())
+    return str(value or "")
+
+
+def _normalize_book_result_urls(book: dict, base_url: str) -> None:
+    """Normalize common Legado detail URL aliases and media URLs in-place."""
+    detail_url = str(book.get("noteUrl") or book.get("bookUrl") or "").strip()
+    if detail_url:
+        detail_url = resolve_relative_url(base_url, detail_url)
+        book["noteUrl"] = detail_url
+        book["bookUrl"] = detail_url
+
+    if book.get("tocUrl"):
+        book["tocUrl"] = resolve_relative_url(base_url, book["tocUrl"])
+    if book.get("coverUrl"):
+        book["coverUrl"] = resolve_relative_url(base_url, book["coverUrl"])
+
+
+def _source_has_explore(source) -> bool:
+    rule_explore = getattr(source, "ruleExplore", None)
+    return bool(getattr(source, "enabledExplore", False) and getattr(rule_explore, "bookList", ""))
+
+
+def _source_search_enabled(source) -> bool:
+    return bool(getattr(source, "enabledSearch", True))
+
+
+def _filter_search_books(books, keyword: str) -> list[dict]:
+    """Keep only search results whose title or author matches the keyword."""
+    filtered: list[dict] = []
+    for index, book in enumerate(books or []):
+        if not isinstance(book, dict):
+            continue
+        if not str(book.get("name") or "").strip():
+            continue
+        score = _search_relevance_score(book, keyword)
+        if score <= 0:
+            continue
+        item = dict(book)
+        item["_searchScore"] = score
+        item["_searchOrder"] = index
+        filtered.append(item)
+    return filtered
+
+
+def _search_relevance_score(book: dict, keyword: str) -> float:
+    """Score title/author relevance for strict global search filtering."""
+    title_keyword = normalize_title(keyword)
+    author_keyword = normalize_author(keyword)
+    if not title_keyword and not author_keyword:
+        return 1.0
+
+    name = str(book.get("name") or "")
+    author = str(book.get("author") or "")
+    title_score = _field_relevance_score(
+        normalize_title(name),
+        title_keyword,
+        exact_score=100,
+        contains_score=80,
+        similar_score=70,
+        threshold=_TITLE_SIMILARITY_THRESHOLD,
+    )
+    author_score = _field_relevance_score(
+        normalize_author(author),
+        author_keyword,
+        exact_score=90,
+        contains_score=60,
+        similar_score=50,
+        threshold=_AUTHOR_SIMILARITY_THRESHOLD,
+    )
+    return max(title_score, author_score)
+
+
+def _field_relevance_score(
+    value: str,
+    keyword: str,
+    exact_score: int,
+    contains_score: int,
+    similar_score: int,
+    threshold: float,
+) -> float:
+    if not value or not keyword:
+        return 0.0
+    if value == keyword:
+        return float(exact_score)
+    if keyword in value or value in keyword:
+        shorter = min(len(value), len(keyword))
+        longer = max(len(value), len(keyword))
+        coverage = shorter / longer if longer else 0
+        return contains_score + coverage
+
+    ratio = similarity(value, keyword)
+    if ratio >= threshold:
+        return similar_score + ratio
+    return 0.0
+
+
+def _first_explore_url(source) -> str:
+    for _label, url in _iter_explore_entries(getattr(source, "exploreUrl", None)):
+        return url
+    return ""
+
+
+def _iter_explore_entries(explore_url) -> list[tuple[str, str]]:
+    values: list[str] = []
+    if isinstance(explore_url, list):
+        values = [str(item) for item in explore_url]
+    elif isinstance(explore_url, str):
+        values = [item.strip() for item in explore_url.splitlines() if item.strip()]
+
+    entries: list[tuple[str, str]] = []
+    for item in values:
+        label, separator, url = item.partition("::")
+        if separator:
+            entries.append((label.strip(), url.strip()))
+        else:
+            entries.append(("", item.strip()))
+    return [(label, url) for label, url in entries if url]
 
 
 def _split_keyword_source(keyword: str) -> tuple[str, str | None]:
@@ -235,7 +470,8 @@ def _source_matches_filter(src, token: str) -> bool:
 
 def _source_cache_scope(sources) -> str:
     ids = sorted(str(src.id) for src in sources if src)
-    return ",".join(ids) if ids else "none"
+    scope = ",".join(ids) if ids else "none"
+    return f"{_SEARCH_CACHE_VERSION}:{scope}"
 
 
 def _flatten_search_results(results_by_source: list[tuple[str, int, list[dict]]]) -> list[dict]:
@@ -248,9 +484,25 @@ def _flatten_search_results(results_by_source: list[tuple[str, int, list[dict]]]
             if not str(book.get("name") or "").strip():
                 continue
             item = dict(book)
+            item["_sourceWeight"] = _weight
             item.setdefault("sourceCount", 1)
             flattened.append(item)
+    flattened.sort(
+        key=lambda item: (
+            -float(item.get("_searchScore") or 0),
+            -int(item.get("_sourceWeight") or 0),
+            int(item.get("_searchOrder") or 0),
+        )
+    )
+    for item in flattened:
+        _strip_search_internal_fields(item)
     return flattened
+
+
+def _strip_search_internal_fields(item: dict) -> None:
+    item.pop("_searchScore", None)
+    item.pop("_searchOrder", None)
+    item.pop("_sourceWeight", None)
 
 
 def _find_source_by_url(url: str, source_id: str | None = None):
@@ -324,6 +576,7 @@ def _proxify_search_results(books: list[dict], public_origin: str) -> list[dict]
         if not isinstance(book, dict):
             continue
         item = dict(book)
+        _strip_search_internal_fields(item)
         _decorate_source_label(item)
         source_id = str(item.get("sourceId") or "").strip()
         detail_url = str(item.get("noteUrl") or item.get("bookUrl") or "").strip()

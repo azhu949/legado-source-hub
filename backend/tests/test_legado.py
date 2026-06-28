@@ -1,12 +1,15 @@
 """Legado compatibility helper tests."""
 
 import asyncio
+import json
 import shutil
 from types import SimpleNamespace
 
 import pytest
 
 from app.core.legado import build_template_url, normalize_source_dict, parse_request_spec
+from app.core.rule_engine import RuleEngine
+from app.core.source_manager import SourceManager
 from app.models.source import BookSource
 
 
@@ -31,10 +34,151 @@ def test_normalize_source_dict_accepts_headers_aliases():
         {
             "headers": '{"Referer":"https://example.com"}',
             "ruleSearch": {"bookUrl": "$.url"},
+            "ruleExplore": {"bookUrl": ".name@href"},
         }
     )
     assert normalized["headers"] == {"Referer": "https://example.com"}
     assert normalized["ruleSearch"]["noteUrl"] == "$.url"
+    assert normalized["ruleExplore"]["noteUrl"] == ".name@href"
+
+
+def test_book_source_preserves_common_legado_explore_and_filter_fields():
+    raw = {
+        "bookSourceName": "山雨阅读",
+        "bookSourceUrl": "https://www.shanyuread.com",
+        "bookSourceComment": "html版",
+        "enabledExplore": True,
+        "exploreUrl": ["玄幻::https://www.shanyuread.com/mufen/cat/xuanhuan/p1_info.html"],
+        "ruleBookInfo": {
+            "author": "#info p:nth-of-type(1)",
+            "authorFilter": ["作者:", ""],
+        },
+        "ruleToc": {
+            "chapterList": "#chapterlist dd a",
+            "chapterName": "text",
+            "chapterUrl": "href",
+            "nextTocUrl": ".listpage .right a@href",
+        },
+        "ruleContent": {
+            "content": "#chapter@html",
+            "contentFilter": ["<script.*?</script>"],
+            "nextContentUrl": "a:contains('下一章')@href",
+        },
+        "ruleExplore": {
+            "bookList": "#list .row",
+            "bookUrl": ".info .name@href",
+            "nextUrl": ".listpage .right a@href",
+        },
+    }
+
+    source = BookSource(**raw)
+    dumped = source.model_dump()
+
+    assert dumped["bookSourceComment"] == "html版"
+    assert dumped["enabledExplore"] is True
+    assert dumped["exploreUrl"] == raw["exploreUrl"]
+    assert dumped["ruleBookInfo"]["authorFilter"] == ["作者:", ""]
+    assert source.ruleToc.nextTocUrl == ".listpage .right a@href"
+    assert source.ruleContent.contentFilter == ["<script.*?</script>"]
+    assert source.ruleExplore.noteUrl == ".info .name@href"
+
+
+def test_import_normalization_keeps_common_legado_fields():
+    raw = {
+        "bookSourceName": "山雨阅读",
+        "bookSourceUrl": "https://www.shanyuread.com",
+        "bookSourceComment": "html版",
+        "enabledExplore": True,
+        "exploreUrl": ["玄幻::https://www.shanyuread.com/mufen/cat/xuanhuan/p1_info.html"],
+        "header": '{"User-Agent":"Mobile UA"}',
+        "ruleExplore": {
+            "bookList": "#list .row",
+            "bookUrl": ".info .name@href",
+        },
+        "ruleContent": {
+            "content": "#chapter@html",
+            "contentFilter": ["<script.*?</script>"],
+        },
+    }
+
+    normalized = SourceManager()._normalize_import(raw)
+
+    assert normalized["bookSourceComment"] == "html版"
+    assert normalized["enabledExplore"] is True
+    assert normalized["exploreUrl"] == raw["exploreUrl"]
+    assert normalized["headers"] == {"User-Agent": "Mobile UA"}
+    assert normalized["ruleExplore"]["noteUrl"] == ".info .name@href"
+    assert normalized["ruleContent"]["contentFilter"] == ["<script.*?</script>"]
+
+
+def test_create_source_ignores_user_supplied_system_fields(monkeypatch, tmp_path):
+    manager = SourceManager()
+    monkeypatch.setattr(manager, "_loaded", True)
+    monkeypatch.setattr(manager, "_cache", {})
+    monkeypatch.setattr(manager.settings, "SOURCES_DIR", tmp_path)
+
+    source = manager.create_source(
+        {
+            "id": "../evil",
+            "createdAt": "bad-created",
+            "updatedAt": "bad-updated",
+            "bookSourceName": "安全测试源",
+            "bookSourceUrl": "https://safe.example",
+        }
+    )
+    stored_files = list(tmp_path.glob("*.json"))
+    assert len(stored_files) == 1
+    stored = json.loads(stored_files[0].read_text(encoding="utf-8"))
+
+    assert source.id != "../evil"
+    assert source.createdAt != "bad-created"
+    assert source.updatedAt != "bad-updated"
+    assert stored["id"] == source.id
+    assert not (tmp_path.parent / "evil.json").exists()
+    with pytest.raises(ValueError):
+        manager._source_file_path("../evil")
+
+
+def test_rule_engine_supports_current_item_attrs_filters_and_page_rules():
+    html = """
+    <div id="info"><p>作者: 测试作者 著</p></div>
+    <dl id="chapterlist">
+      <dd><a href="/c1.html">第一章</a></dd>
+      <dd><a href="/c2.html">第二章</a></dd>
+    </dl>
+    <div class="listpage"><span class="right"><a href="/p2.html">下一页</a></span></div>
+    <div id="chapter">正文<script>bad()</script><div id="p-cache">广告</div></div>
+    """
+
+    toc = RuleEngine.apply_rules(
+        html,
+        {
+            "chapterList": "#chapterlist dd a",
+            "chapterName": "text",
+            "chapterUrl": "href",
+            "nextTocUrl": ".listpage .right a@href",
+        },
+    )
+    info = RuleEngine.apply_rules(
+        html,
+        {"author": "#info p:nth-of-type(1)", "authorFilter": [r"作者:\s*(.*?)\s*著", r"\1"]},
+    )
+    content = RuleEngine.apply_rules(
+        html,
+        {
+            "content": "#chapter@html",
+            "contentFilter": ["<script.*?</script>", '<div id="p-cache.*?</div>'],
+        },
+    )
+
+    assert toc["chapterList"] == [
+        {"chapterName": "第一章", "chapterUrl": "/c1.html"},
+        {"chapterName": "第二章", "chapterUrl": "/c2.html"},
+    ]
+    assert toc["nextTocUrl"] == "/p2.html"
+    assert info["author"] == "测试作者"
+    assert "bad()" not in content["content"]
+    assert "广告" not in content["content"]
 
 
 def test_parse_request_spec_post_body():

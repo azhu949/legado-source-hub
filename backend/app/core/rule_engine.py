@@ -28,6 +28,12 @@ _REGEX_PREFIX = "@regex:"
 _JSON_PREFIX = "@json:"
 _JSONPATH_PREFIX = "$"
 _XSW_AES_CONTENT_RULE = "@xsw-aes-content"
+_FILTER_SUFFIX = "Filter"
+_META_RULE_KEYS = {"init"}
+_LIST_PAGE_RULE_KEYS = {
+    "bookList": {"nextUrl"},
+    "chapterList": {"nextTocUrl"},
+}
 
 
 class RuleEngine:
@@ -101,11 +107,11 @@ class RuleEngine:
         # 普通字段提取
         result: dict[str, Any] = {}
         for field, rule in rules.items():
-            if not rule:
+            if not rule or RuleEngine._is_non_extract_rule(field):
                 continue
             val = RuleEngine.extract(content, rule, is_json)
             result[field] = RuleEngine._normalize_value(val)
-        return result
+        return RuleEngine._apply_field_filters(result, rules)
 
     # ---------------- JSON / JsonPath ----------------
 
@@ -200,6 +206,7 @@ class RuleEngine:
         """使用 BeautifulSoup 执行 CSS 选择器提取。"""
         try:
             soup = BeautifulSoup(content, "lxml")
+            rule = RuleEngine._normalize_css_selector(rule)
             elements = soup.select(rule)
             if not elements:
                 return None
@@ -277,8 +284,16 @@ class RuleEngine:
         if not isinstance(items, list):
             items = [items]
 
+        page_rule_keys = _LIST_PAGE_RULE_KEYS.get(list_key, set())
+        page_rules = {
+            k: v for k, v in rules.items()
+            if k in page_rule_keys and v and not RuleEngine._is_non_extract_rule(k)
+        }
         # 子规则字段
-        child_rules = {k: v for k, v in rules.items() if k != list_key}
+        child_rules = {
+            k: v for k, v in rules.items()
+            if k != list_key and k not in page_rule_keys and not RuleEngine._is_non_extract_rule(k)
+        }
         results: list[dict] = []
 
         for item in items:
@@ -298,11 +313,17 @@ class RuleEngine:
                 for field, rule in child_rules.items():
                     if not rule:
                         continue
-                    val = RuleEngine.extract(item_html, rule, is_json)
+                    val = RuleEngine._extract_item_child_rule(item_html, rule, is_json)
                     entry[field] = RuleEngine._normalize_value(val)
+            entry = RuleEngine._apply_field_filters(entry, rules)
             results.append(entry)
 
-        return {list_key: results}
+        result: dict[str, Any] = {list_key: results}
+        for field, rule in page_rules.items():
+            val = RuleEngine.extract(content, rule, is_json)
+            result[field] = RuleEngine._normalize_value(val)
+
+        return result
 
     @staticmethod
     def _extract_list_items(content: str, list_rule: str, is_json: bool) -> Any:
@@ -332,6 +353,7 @@ class RuleEngine:
         selector = selector_attr[0] if selector_attr else rule
         try:
             soup = BeautifulSoup(content, "lxml")
+            selector = RuleEngine._normalize_css_selector(selector)
             elements = soup.select(selector)
             if not elements:
                 return None
@@ -339,6 +361,41 @@ class RuleEngine:
         except Exception as e:  # noqa: BLE001
             logger.debug("列表 CSS 提取失败 rule=%r err=%s", rule, e)
             return RuleEngine.extract(content, rule, is_json=False)
+
+    @staticmethod
+    def _extract_item_child_rule(item_html: str, rule: str, is_json: bool) -> Any:
+        """Apply a child rule to a list item, supporting current-node attrs."""
+        if is_json:
+            return RuleEngine.extract(item_html, rule, is_json)
+
+        normalized_rule = RuleEngine._strip_legado_scripts(str(rule))
+        if RuleEngine._is_current_item_attr_rule(normalized_rule):
+            value = RuleEngine._extract_current_item_attr(item_html, normalized_rule)
+            if value is not None:
+                return value
+        return RuleEngine.extract(item_html, rule, is_json)
+
+    @staticmethod
+    def _is_current_item_attr_rule(rule: str) -> bool:
+        if rule in {"text", "textNodes", "html", "outerHtml"}:
+            return True
+        return bool(re.fullmatch(r"[A-Za-z_:][-A-Za-z0-9_:.]*", rule or ""))
+
+    @staticmethod
+    def _extract_current_item_attr(item_html: str, attr: str) -> Any:
+        try:
+            soup = BeautifulSoup(item_html, "lxml")
+            node = None
+            for candidate in soup.find_all(True):
+                if candidate.name not in {"html", "body"}:
+                    node = candidate
+                    break
+            if node is None:
+                return None
+            return RuleEngine._soup_node_to_attr(node, attr)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("当前节点属性提取失败 attr=%r err=%s", attr, e)
+            return None
 
     # ---------------- 工具方法 ----------------
 
@@ -371,6 +428,82 @@ class RuleEngine:
                 return val[0] if val[0] is not None else ""
             return val
         return val
+
+    @staticmethod
+    def _is_non_extract_rule(field: str) -> bool:
+        return field in _META_RULE_KEYS or field.endswith(_FILTER_SUFFIX)
+
+    @staticmethod
+    def _apply_field_filters(result: dict[str, Any], rules: dict) -> dict[str, Any]:
+        """Apply Legado ``nameFilter`` / ``contentFilter`` style cleanup rules."""
+        for field, filter_rule in rules.items():
+            if not field.endswith(_FILTER_SUFFIX) or not filter_rule:
+                continue
+            target_field = field[: -len(_FILTER_SUFFIX)]
+            if not target_field or target_field not in result:
+                continue
+            result[target_field] = RuleEngine._apply_filter_value(
+                result[target_field],
+                filter_rule,
+                target_field=target_field,
+            )
+        return result
+
+    @staticmethod
+    def _apply_filter_value(value: Any, filter_rule: Any, target_field: str = "") -> Any:
+        if isinstance(value, list):
+            return [
+                RuleEngine._apply_filter_value(item, filter_rule, target_field=target_field)
+                for item in value
+            ]
+        if value is None:
+            return value
+
+        text = str(value)
+        for pattern, replacement in RuleEngine._iter_filter_operations(filter_rule, target_field):
+            try:
+                text = re.sub(pattern, replacement, text, flags=re.S)
+            except re.error:
+                text = text.replace(pattern, replacement)
+        return text.strip()
+
+    @staticmethod
+    def _iter_filter_operations(filter_rule: Any, target_field: str = "") -> list[tuple[str, str]]:
+        operations: list[tuple[str, str]] = []
+
+        if isinstance(filter_rule, dict):
+            pattern = filter_rule.get("regex") or filter_rule.get("pattern")
+            replacement = filter_rule.get("replacement", filter_rule.get("replace", ""))
+            if pattern:
+                operations.append((str(pattern), str(replacement)))
+            return operations
+
+        if isinstance(filter_rule, str):
+            text = filter_rule.strip()
+            if not text:
+                return operations
+            if "##" in text:
+                pattern, replacement = text.split("##", 1)
+                operations.append((pattern, replacement))
+            else:
+                operations.append((text, ""))
+            return operations
+
+        if isinstance(filter_rule, list):
+            if RuleEngine._is_filter_replacement_pair(filter_rule, target_field):
+                operations.append((str(filter_rule[0]), str(filter_rule[1])))
+                return operations
+            for item in filter_rule:
+                operations.extend(RuleEngine._iter_filter_operations(item, target_field))
+        return operations
+
+    @staticmethod
+    def _is_filter_replacement_pair(filter_rule: list[Any], target_field: str) -> bool:
+        if len(filter_rule) != 2:
+            return False
+        if any(isinstance(item, (dict, list)) for item in filter_rule):
+            return False
+        return target_field != "content"
 
     @staticmethod
     def _apply_operator_rules(content: str, parts: list[str], operator: str, is_json: bool) -> Any:
@@ -536,6 +669,7 @@ class RuleEngine:
         try:
             soup = BeautifulSoup(content, "lxml")
             selector, index = RuleEngine._strip_selector_index(selector)
+            selector = RuleEngine._normalize_css_selector(selector)
             elements = soup.select(selector)
             if not elements:
                 return None
@@ -595,6 +729,10 @@ class RuleEngine:
         if not match:
             return selector, None
         return match.group(1), int(match.group(2))
+
+    @staticmethod
+    def _normalize_css_selector(selector: str) -> str:
+        return str(selector or "").replace(":contains(", ":-soup-contains(")
 
     @staticmethod
     def _looks_like_css_selector(rule: str) -> bool:

@@ -35,24 +35,24 @@ const sourceSchema = z.object({
     coverUrl: z.string().default(""),
     noteUrl: z.string().default(""),
     wordCount: z.string().default(""),
-  }).default({}),
+  }).passthrough().default({}),
   ruleBookInfo: z.object({
     name: z.string().default(""),
     author: z.string().default(""),
     intro: z.string().default(""),
     coverUrl: z.string().default(""),
     tocUrl: z.string().default(""),
-  }).default({}),
+  }).passthrough().default({}),
   ruleToc: z.object({
     chapterList: z.string().default(""),
     chapterName: z.string().default(""),
     chapterUrl: z.string().default(""),
-  }).default({}),
+  }).passthrough().default({}),
   ruleContent: z.object({
     content: z.string().default(""),
-  }).default({}),
+  }).passthrough().default({}),
   headers: z.any().nullable().default(null),
-})
+}).passthrough()
 
 type SourceFormData = z.infer<typeof sourceSchema>
 

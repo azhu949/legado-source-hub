@@ -1,10 +1,10 @@
 """书源 Pydantic 数据模型。"""
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.legado import normalize_source_dict
 
@@ -13,7 +13,13 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class RuleSearch(BaseModel):
+class LegadoRuleModel(BaseModel):
+    """Base model that keeps unsupported Legado rule fields for round-tripping."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class RuleSearch(LegadoRuleModel):
     """搜索提取规则。"""
 
     bookList: str = ""
@@ -24,10 +30,12 @@ class RuleSearch(BaseModel):
     intro: Optional[str] = ""
     coverUrl: Optional[str] = ""
     noteUrl: Optional[str] = ""
+    bookUrl: Optional[str] = ""
+    tocUrl: Optional[str] = ""
     wordCount: Optional[str] = ""
 
 
-class RuleBookInfo(BaseModel):
+class RuleBookInfo(LegadoRuleModel):
     """书籍详情提取规则。"""
 
     name: str = ""
@@ -40,33 +48,64 @@ class RuleBookInfo(BaseModel):
     tocUrl: str = ""
 
 
-class RuleToc(BaseModel):
+class RuleToc(LegadoRuleModel):
     """章节目录提取规则。"""
 
     chapterList: str = ""
     chapterName: str = ""
     chapterUrl: str = ""
+    nextTocUrl: Optional[str] = ""
 
 
-class RuleContent(BaseModel):
+class RuleContent(LegadoRuleModel):
     """正文提取规则。"""
 
     content: str = ""
+    contentFilter: Any = None
+    prevContentUrl: Optional[str] = ""
+    nextContentUrl: Optional[str] = ""
+
+
+class RuleExplore(LegadoRuleModel):
+    """发现/分类页提取规则。"""
+
+    bookList: str = ""
+    name: str = ""
+    author: str = ""
+    kind: Optional[str] = ""
+    lastChapter: Optional[str] = ""
+    intro: Optional[str] = ""
+    coverUrl: Optional[str] = ""
+    noteUrl: Optional[str] = ""
+    bookUrl: Optional[str] = ""
+    tocUrl: Optional[str] = ""
+    wordCount: Optional[str] = ""
+    nextUrl: Optional[str] = ""
 
 
 class BookSourceBase(BaseModel):
     """书源基础字段。"""
 
+    model_config = ConfigDict(extra="allow")
+
     bookSourceName: str = Field(..., min_length=1, max_length=50, description="书源名称")
     bookSourceGroup: str = Field(default="未分组", max_length=50, description="书源分组")
+    bookSourceComment: Optional[str] = ""
     bookSourceUrl: str = Field(..., min_length=1, description="源站基础URL")
+    bookSourceType: int = 0
+    bookUrlPattern: Optional[str] = ""
+    customOrder: int = 0
     enabled: bool = True
+    enabledExplore: bool = False
+    enabledSearch: bool = True
     weight: int = Field(default=100, ge=0, le=9999, description="权重")
     searchUrl: str = Field(default="", description="搜索URL模板")
+    exploreUrl: Any = None
     ruleSearch: RuleSearch = Field(default_factory=RuleSearch)
     ruleBookInfo: RuleBookInfo = Field(default_factory=RuleBookInfo)
     ruleToc: RuleToc = Field(default_factory=RuleToc)
     ruleContent: RuleContent = Field(default_factory=RuleContent)
+    ruleExplore: RuleExplore = Field(default_factory=RuleExplore)
     headers: Optional[dict[str, str]] = Field(default=None, description="自定义请求头")
 
     @model_validator(mode="before")

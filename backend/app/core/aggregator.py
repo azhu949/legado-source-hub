@@ -57,19 +57,29 @@ class Aggregator:
                     entry["name"] = entry.get("name", name) or name
                     entry["author"] = entry.get("author", author) or author
                     entry["_weight"] = weight
+                    entry["_searchScore"] = float(entry.get("_searchScore") or 0)
+                    entry["_searchOrder"] = int(entry.get("_searchOrder") or 0)
                     entry["_sources"] = [source_id]
                     entry["_sourceNames"] = [source_name] if source_name else []
                     entry["_fingerprint"] = fp
                     aggregated.append(entry)
                     fingerprints.append(fp)
 
-        # 按权重降序排序
-        aggregated.sort(key=lambda x: x.get("_weight", 0), reverse=True)
+        # 搜索相关性优先，同分时按权重和源内顺序排序。
+        aggregated.sort(
+            key=lambda x: (
+                -float(x.get("_searchScore") or 0),
+                -int(x.get("_weight") or 0),
+                int(x.get("_searchOrder") or 0),
+            )
+        )
 
         # 移除内部字段
         for book in aggregated:
             book.pop("_weight", None)
             book.pop("_fingerprint", None)
+            book.pop("_searchScore", None)
+            book.pop("_searchOrder", None)
             # 保留 _sources 作为多源标记（前端可展示），重命名为 sources
             sources = book.pop("_sources", [])
             source_names = book.pop("_sourceNames", [])
@@ -123,6 +133,14 @@ class Aggregator:
 
         # 更新权重为最大值
         existing["_weight"] = max(existing.get("_weight", 0), weight)
+        existing["_searchScore"] = max(
+            float(existing.get("_searchScore") or 0),
+            float(new_book.get("_searchScore") or 0),
+        )
+        existing["_searchOrder"] = min(
+            int(existing.get("_searchOrder") or 0),
+            int(new_book.get("_searchOrder") or 0),
+        )
 
         # 补充缺失字段
         merge_fields = [
