@@ -72,11 +72,24 @@ def normalize_source_dict(data: Any) -> Any:
         normalized["headers"] = headers
 
     if "ruleSearch" in normalized:
-        normalized["ruleSearch"] = normalize_rule_aliases(normalized["ruleSearch"])
+        normalized["ruleSearch"] = _normalize_rule_object(normalized["ruleSearch"])
+    if "ruleBookInfo" in normalized:
+        normalized["ruleBookInfo"] = _normalize_rule_object(normalized["ruleBookInfo"])
+    if "ruleToc" in normalized:
+        normalized["ruleToc"] = _normalize_rule_object(normalized["ruleToc"])
+    if "ruleContent" in normalized:
+        normalized["ruleContent"] = _normalize_rule_object(normalized["ruleContent"])
     if "ruleExplore" in normalized:
-        normalized["ruleExplore"] = normalize_rule_aliases(normalized["ruleExplore"])
+        normalized["ruleExplore"] = _normalize_rule_object(normalized["ruleExplore"])
 
     return normalized
+
+
+def _normalize_rule_object(rules: Any) -> Any:
+    """Treat empty Legado rule arrays as blank rule objects."""
+    if rules == []:
+        return {}
+    return normalize_rule_aliases(rules)
 
 
 def build_template_url(template: str, keyword: str, page: int = 1, source_key: str = "") -> str:

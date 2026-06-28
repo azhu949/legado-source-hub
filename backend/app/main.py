@@ -2,7 +2,9 @@
 
 import json
 import logging
+import sys
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
@@ -21,17 +23,34 @@ from app.utils.public_url import get_public_origin
 
 # 日志配置
 settings = get_settings()
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+_LOG_LEVEL = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+_log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+try:
+    settings.RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(
+        RotatingFileHandler(
+            settings.RUNTIME_LOG_PATH,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    )
+except OSError as exc:
+    print(f"failed to open runtime log file: {exc}", file=sys.stderr, flush=True)
+
+logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT, handlers=_log_handlers, force=True)
+for _logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access", "app"):
+    logging.getLogger(_logger_name).setLevel(_LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理。"""
-    logger.info("启动聚合书源管理系统...")
+    print(f"novl backend starting log_level={settings.LOG_LEVEL}", flush=True)
+    logger.info("启动聚合书源管理系统... runtime_log=%s", settings.RUNTIME_LOG_PATH)
 
     # 初始化数据库
     init_db()

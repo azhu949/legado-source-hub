@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import logging
+import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import APIRouter, Query, Request
@@ -21,7 +22,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["public"])
 _MAX_TOC_PAGES = 20
 _MAX_CONTENT_PAGES = 20
-_SEARCH_CACHE_VERSION = "rel3"
+_SEARCH_CACHE_VERSION = "rel4"
+_BOOK_CACHE_VERSION = "book3"
+_TOC_CACHE_VERSION = "toc3"
 _TITLE_SIMILARITY_THRESHOLD = 0.82
 _AUTHOR_SIMILARITY_THRESHOLD = 0.86
 
@@ -44,48 +47,97 @@ async def search(
     sources = _select_sources(source_id=source_id, source_filter=source_filter)
     sources = [source for source in sources if _source_search_enabled(source)]
     if not sources:
+        logger.info(
+            "搜索无可用书源 keyword=%r page=%s merge=%s sourceId=%s source=%r",
+            keyword,
+            page,
+            merge,
+            source_id,
+            source_filter,
+        )
         return success(data=[])
 
     source_scope = _source_cache_scope(sources)
     cached = await cache.get_search(keyword, page, source_scope=source_scope, merge=merge)
     if cached is not None:
+        _log_search_cache_hit(keyword, page, merge, cached)
         return success(data=_proxify_search_results(cached, get_public_origin(request)))
+
+    logger.info(
+        "开始搜索 keyword=%r page=%s merge=%s sourceId=%s source=%r selected=%s",
+        keyword,
+        page,
+        merge,
+        source_id,
+        source_filter,
+        _source_summary(sources),
+    )
 
     # 并发搜索
     semaphore = asyncio.Semaphore(15)
 
     async def _search_one(src):
         async with semaphore:
-            request = await build_search_request(src, keyword, page)
-            if not request:
+            search_request = await build_search_request(src, keyword, page)
+            if not search_request:
+                logger.info(
+                    "搜索源跳过 keyword=%r source=%s reason=no_search_request",
+                    keyword,
+                    _source_log_label(src),
+                )
                 return src.id, src.weight, []
             headers = src.headers or {}
-            resp = await execute_request(request, source_headers=headers)
+            resp = await execute_request(search_request, source_headers=headers)
             if resp["status"] != 200 or not resp["body"]:
+                logger.info(
+                    "搜索源请求无结果 keyword=%r source=%s status=%s body_len=%d",
+                    keyword,
+                    _source_log_label(src),
+                    resp.get("status"),
+                    len(str(resp.get("body") or "")),
+                )
                 return src.id, src.weight, []
             is_json = response_is_json(resp)
             try:
                 rules = src.ruleSearch.model_dump()
-                extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json)
+                extracted = RuleEngine.apply_rules(
+                    resp["body"],
+                    rules,
+                    is_json=is_json,
+                    base_url=search_request.url,
+                )
                 books = extracted.get("bookList", []) if isinstance(extracted, dict) else []
+                if isinstance(books, dict):
+                    books = [books]
+                raw_count = _count_books(books)
                 books = _filter_search_books(books, keyword)
+                filtered_count = len(books)
                 for book in books:
                     book["sourceId"] = src.id
                     book["sourceName"] = src.bookSourceName
                     _normalize_book_result_urls(book, src.bookSourceUrl)
+                logger.info(
+                    "搜索源结果 keyword=%r source=%s raw=%d filtered=%d",
+                    keyword,
+                    _source_log_label(src),
+                    raw_count,
+                    filtered_count,
+                )
                 return src.id, src.weight, books
             except Exception as e:  # noqa: BLE001
-                logger.debug("书源 %s 搜索提取失败: %s", src.bookSourceName, e)
+                logger.warning("搜索源提取失败 keyword=%r source=%s err=%s", keyword, _source_log_label(src), e)
                 return src.id, src.weight, []
 
     tasks = [_search_one(src) for src in sources]
     results = await asyncio.gather(*tasks, return_exceptions=False)
+    _log_search_source_results(keyword, page, merge, sources, results)
 
     books = (
         Aggregator.aggregate_search_results(results)
         if merge == 1
         else _flatten_search_results(results)
     )
+    logger.info("搜索完成 keyword=%r page=%s merge=%s total=%d", keyword, page, merge, len(books))
 
     # 写缓存
     await cache.set_search(keyword, page, books, source_scope=source_scope, merge=merge)
@@ -121,6 +173,7 @@ async def explore(
         resp["body"],
         source.ruleExplore.model_dump(),
         is_json=response_is_json(resp),
+        base_url=target_url,
     )
     books = extracted.get("bookList", []) if isinstance(extracted, dict) else []
     if isinstance(books, dict):
@@ -153,7 +206,7 @@ async def get_book_info(
 ):
     """书籍详情：从对应源站获取详情信息。"""
     source_hint = source_id or _source_id_from_url(url)
-    url_hash = hashlib.md5(f"{source_hint}:{url}".encode()).hexdigest()
+    url_hash = hashlib.md5(f"{_BOOK_CACHE_VERSION}:{source_hint}:{url}".encode()).hexdigest()
     cached = await cache.get_book(url_hash)
     if cached is not None:
         if source_id and isinstance(cached, dict):
@@ -170,7 +223,7 @@ async def get_book_info(
 
     is_json = response_is_json(resp)
     rules = source.ruleBookInfo.model_dump()
-    info = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json)
+    info = RuleEngine.apply_rules(resp["body"], rules, is_json=is_json, base_url=url)
 
     # 解析 tocUrl 为绝对地址
     if isinstance(info, dict) and info.get("tocUrl"):
@@ -195,7 +248,7 @@ async def get_toc(
 ):
     """章节目录：从源站获取章节列表。"""
     source_hint = source_id or _source_id_from_url(url)
-    url_hash = hashlib.md5(f"{source_hint}:{url}".encode()).hexdigest()
+    url_hash = hashlib.md5(f"{_TOC_CACHE_VERSION}:{source_hint}:{url}".encode()).hexdigest()
     cached = await cache.get_toc(url_hash)
     if cached is not None:
         return success(data=_proxify_toc_chapters(cached, get_public_origin(request), source_id=source_id))
@@ -210,7 +263,8 @@ async def get_toc(
 
     chapters = Aggregator.aggregate_toc_results(chapters)
 
-    await cache.set_toc(url_hash, chapters)
+    if chapters:
+        await cache.set_toc(url_hash, chapters)
     return success(data=_proxify_toc_chapters(chapters, get_public_origin(request), source_id=source.id))
 
 
@@ -226,7 +280,19 @@ async def get_content(
 
     content, failed_status = await _collect_content_pages(source, url)
     if failed_status is not None:
+        logger.info(
+            "正文获取失败 source=%s url=%s status=%s",
+            _source_log_label(source),
+            url,
+            failed_status,
+        )
         return error("FETCH_FAILED", f"源站请求失败: HTTP {failed_status}")
+    logger.info(
+        "正文获取完成 source=%s url=%s len=%d",
+        _source_log_label(source),
+        url,
+        len(content),
+    )
     return success(data={"content": content})
 
 
@@ -252,7 +318,12 @@ async def _collect_toc_chapters(source, start_url: str) -> tuple[list[dict], int
         if resp["status"] != 200:
             return chapters, resp["status"] if not chapters else None
 
-        extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=response_is_json(resp))
+        extracted = RuleEngine.apply_rules(
+            resp["body"],
+            rules,
+            is_json=response_is_json(resp),
+            base_url=current_url,
+        )
         page_chapters = extracted.get("chapterList", []) if isinstance(extracted, dict) else []
         if isinstance(page_chapters, dict):
             page_chapters = [page_chapters]
@@ -279,21 +350,67 @@ async def _collect_content_pages(source, start_url: str) -> tuple[str, int | Non
             break
         seen.add(current_url)
 
-        resp = await http_client.get(current_url, headers=source.headers or {})
+        fetch_url = _preferred_content_url(current_url)
+        resp = await http_client.get(fetch_url, headers=source.headers or {})
         if resp["status"] != 200:
             return "\n".join(parts), resp["status"] if not parts else None
 
-        extracted = RuleEngine.apply_rules(resp["body"], rules, is_json=response_is_json(resp))
+        extracted = RuleEngine.apply_rules(
+            resp["body"],
+            rules,
+            is_json=response_is_json(resp),
+            base_url=fetch_url,
+        )
         content = _content_value_to_text(extracted.get("content", "") if isinstance(extracted, dict) else "")
+        if not content:
+            content = _content_fallback_text(resp["body"], fetch_url)
+        elif _is_xsw_url(fetch_url):
+            content = _clean_xsw_content_html(content)
+        logger.info(
+            "正文页提取 source=%s url=%s fetchUrl=%s status=%s len=%d",
+            _source_log_label(source),
+            current_url,
+            fetch_url,
+            resp.get("status"),
+            len(content),
+        )
         if content:
             parts.append(content)
 
         next_url = str(extracted.get("nextContentUrl") or "").strip() if isinstance(extracted, dict) else ""
         if not next_url or not follow_next_content:
             break
-        current_url = resolve_relative_url(current_url, next_url)
+        current_url = resolve_relative_url(fetch_url, next_url)
 
     return "\n".join(parts), None
+
+
+def _content_fallback_text(body: str, url: str) -> str:
+    if not _is_xsw_url(url):
+        return ""
+    return _clean_xsw_content_html(
+        RuleEngine.extract(body, "#nr1@html")
+        or RuleEngine.extract(body, "@xsw-aes-content")
+    )
+
+
+def _preferred_content_url(url: str) -> str:
+    return _xsw_www_to_mobile_chapter_url(url) or url
+
+
+def _xsw_www_to_mobile_chapter_url(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    if parsed.netloc.lower() != "www.xsw.tw":
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 3 or parts[0] != "book" or not parts[1].isdigit() or not parts[2].endswith(".html"):
+        return ""
+    return f"{parsed.scheme or 'https'}://m.xsw.tw/{parts[1]}/{parts[2]}"
+
+
+def _is_xsw_url(url: str) -> bool:
+    host = urlparse(str(url or "")).netloc.lower()
+    return host in {"www.xsw.tw", "m.xsw.tw"}
 
 
 def _should_follow_next_content_url(rule) -> bool:
@@ -308,6 +425,32 @@ def _content_value_to_text(value) -> str:
     return str(value or "")
 
 
+def _clean_xsw_content_html(value) -> str:
+    text = _content_value_to_text(value)
+    if not text:
+        return ""
+    replacements = (
+        (r"<br\s*/?>", "\n"),
+        (r"</p\s*>", "\n"),
+        (r"<p[^>]*>", "\n"),
+        (r"<[^>]+>", ""),
+        (r"&nbsp;", " "),
+        ("\xa0", " "),
+        (r"(?<=[\u4e00-\u9fff0-9，。！？；：“”‘’、])[\xa0 ]+(?=[\u4e00-\u9fff0-9，。！？；：“”‘’、])", ""),
+        (r"&amp;", "&"),
+        (r"&lt;", "<"),
+        (r"&gt;", ">"),
+        (r"&#39;", "'"),
+        (r"&quot;", '"'),
+        (r"\r", ""),
+        (r"[ \t]+\n", "\n"),
+        (r"\n{3,}", "\n\n"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text.strip()
+
+
 def _normalize_book_result_urls(book: dict, base_url: str) -> None:
     """Normalize common Legado detail URL aliases and media URLs in-place."""
     detail_url = str(book.get("noteUrl") or book.get("bookUrl") or "").strip()
@@ -316,10 +459,83 @@ def _normalize_book_result_urls(book: dict, base_url: str) -> None:
         book["noteUrl"] = detail_url
         book["bookUrl"] = detail_url
 
-    if book.get("tocUrl"):
-        book["tocUrl"] = resolve_relative_url(base_url, book["tocUrl"])
-    if book.get("coverUrl"):
-        book["coverUrl"] = resolve_relative_url(base_url, book["coverUrl"])
+    toc_url = str(book.get("tocUrl") or "").strip()
+    if toc_url:
+        book["tocUrl"] = resolve_relative_url(base_url, toc_url)
+    cover_url = str(book.get("coverUrl") or "").strip()
+    if cover_url:
+        book["coverUrl"] = resolve_relative_url(base_url, cover_url)
+
+
+def _count_books(books) -> int:
+    if isinstance(books, list):
+        return len([book for book in books if isinstance(book, dict)])
+    if isinstance(books, dict):
+        return 1
+    return 0
+
+
+def _source_log_label(source) -> str:
+    name = str(getattr(source, "bookSourceName", "") or "").strip()
+    source_id = str(getattr(source, "id", "") or "").strip()
+    if name and source_id:
+        return f"{name}({source_id})"
+    return name or source_id or "unknown"
+
+
+def _source_summary(sources) -> str:
+    labels = [_source_log_label(source) for source in sources or []]
+    return "、".join(labels) if labels else "无"
+
+
+def _log_search_source_results(keyword: str, page: int, merge: int, sources, results_by_source) -> None:
+    source_by_id = {str(getattr(source, "id", "")): source for source in sources or []}
+    counts: list[str] = []
+    hits: list[str] = []
+    total = 0
+
+    for source_id, _weight, books in results_by_source or []:
+        source = source_by_id.get(str(source_id))
+        label = _source_log_label(source) if source else str(source_id or "unknown")
+        count = _count_books(books)
+        total += count
+        counts.append(f"{label}={count}")
+        if count > 0:
+            hits.append(label)
+
+    logger.info(
+        "搜索源汇总 keyword=%r page=%s merge=%s hit_sources=%s total_by_source=%d counts=%s",
+        keyword,
+        page,
+        merge,
+        "、".join(hits) if hits else "无",
+        total,
+        "；".join(counts) if counts else "无",
+    )
+
+
+def _log_search_cache_hit(keyword: str, page: int, merge: int, books) -> None:
+    counts: dict[str, int] = {}
+    for book in books or []:
+        if not isinstance(book, dict):
+            continue
+        labels = book.get("sourceNames")
+        if isinstance(labels, list) and labels:
+            source_names = [str(label).strip() for label in labels if str(label).strip()]
+        else:
+            source_names = [str(book.get("sourceName") or book.get("sourceId") or "unknown").strip()]
+        for source_name in source_names:
+            counts[source_name or "unknown"] = counts.get(source_name or "unknown", 0) + 1
+
+    logger.info(
+        "搜索命中缓存 keyword=%r page=%s merge=%s hit_sources=%s total=%d counts=%s",
+        keyword,
+        page,
+        merge,
+        "、".join(name for name, count in counts.items() if count > 0) or "无",
+        _count_books(books),
+        "；".join(f"{name}={count}" for name, count in counts.items()) or "无",
+    )
 
 
 def _source_has_explore(source) -> bool:
@@ -565,6 +781,7 @@ def _normalize_toc_chapters(chapters: list[dict], base_url: str) -> list[dict]:
         chapter_url = str(chapter.get("url") or chapter.get("chapterUrl") or "").strip()
         if chapter_url:
             chapter_url = resolve_relative_url(base_url, chapter_url)
+            chapter_url = _xsw_www_to_mobile_chapter_url(chapter_url) or chapter_url
         normalized.append({"name": name, "url": chapter_url})
     return normalized
 

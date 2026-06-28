@@ -127,6 +127,10 @@ def build_search_url(template: str, keyword: str, page: int = 1) -> str:
 
 def resolve_relative_url(base: str, url: str) -> str:
     """将相对URL解析为绝对URL。"""
+    if url is None:
+        return ""
+    url = str(url).strip()
+    base = str(base or "").strip()
     if not url:
         return ""
     if url.startswith(("http://", "https://")):

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     DATA_DIR: Path = Path(__file__).resolve().parent.parent / "data"
     SOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "data" / "sources"
     DB_PATH: Path = Path(__file__).resolve().parent.parent / "data" / "logs.db"
+    RUNTIME_LOG_PATH: Path = Path(__file__).resolve().parent.parent / "data" / "logs" / "backend.log"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
@@ -58,6 +59,7 @@ class Settings(BaseSettings):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.SOURCES_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

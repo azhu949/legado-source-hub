@@ -1,14 +1,17 @@
 """操作日志 & 统计路由。"""
 
+from collections import deque
 import csv
 import io
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
+from app.config import get_settings
 from app.core.auth import get_current_user
 from app.core.cache import cache
 from app.core.source_manager import source_manager
@@ -117,3 +120,27 @@ async def get_recent_logs_api(
     """最近操作日志（仪表盘用）。"""
     logs = get_recent_logs(limit)
     return success(data=logs)
+
+
+@router.get("/runtime-logs")
+async def get_runtime_logs(
+    lines: int = Query(200, ge=1, le=2000),
+    _user=Depends(get_current_user),
+):
+    """运行日志尾部内容。"""
+    path = get_settings().RUNTIME_LOG_PATH
+    log_lines = _tail_runtime_log(path, lines)
+    return success(
+        data={
+            "path": str(path),
+            "exists": path.exists(),
+            "lines": log_lines,
+        }
+    )
+
+
+def _tail_runtime_log(path: Path, limit: int) -> list[str]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        return [line.rstrip("\n") for line in deque(file, maxlen=limit)]

@@ -42,6 +42,16 @@ def test_normalize_source_dict_accepts_headers_aliases():
     assert normalized["ruleExplore"]["noteUrl"] == ".name@href"
 
 
+def test_book_source_accepts_empty_rule_array_as_blank_rule_object():
+    source = BookSource(
+        bookSourceName="番茄小说源",
+        bookSourceUrl="https://novel.cooks.tw",
+        ruleExplore=[],
+    )
+
+    assert source.ruleExplore.bookList == ""
+
+
 def test_book_source_preserves_common_legado_explore_and_filter_fields():
     raw = {
         "bookSourceName": "山雨阅读",

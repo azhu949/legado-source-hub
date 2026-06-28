@@ -1,5 +1,6 @@
 """Public aggregate source compatibility tests."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -8,7 +9,9 @@ from fastapi.testclient import TestClient
 import app.main as main_api
 import app.api.public as public_api
 from app.api.public import (
+    _collect_content_pages,
     _filter_search_books,
+    _normalize_book_result_urls,
     _proxy_api_url,
     _proxify_book_info,
     _proxify_search_results,
@@ -233,6 +236,20 @@ def test_search_relevance_matches_traditional_text_with_simplified_keyword():
     assert _search_relevance_score({"name": "无关书", "author": "路人", "intro": "辰東推荐"}, "辰东") == 0
 
 
+def test_normalize_book_result_urls_accepts_non_string_fields():
+    book = {
+        "name": "风水之王",
+        "bookUrl": "https://novel.cooks.tw/api/novel/detail/416?lang=zh-CN",
+        "coverUrl": 416,
+    }
+
+    _normalize_book_result_urls(book, "https://novel.cooks.tw")
+
+    assert book["bookUrl"] == "https://novel.cooks.tw/api/novel/detail/416?lang=zh-CN"
+    assert book["noteUrl"] == "https://novel.cooks.tw/api/novel/detail/416?lang=zh-CN"
+    assert book["coverUrl"] == "https://novel.cooks.tw/416"
+
+
 def _install_fake_source(monkeypatch, source):
     monkeypatch.setattr(public_api.source_manager, "get_source", lambda source_id: source if source_id == source.id else None)
     monkeypatch.setattr(public_api.source_manager, "get_enabled_sources", lambda: [source])
@@ -289,6 +306,60 @@ def test_public_book_falls_back_to_detail_url_as_toc_url(monkeypatch):
     )
 
 
+def test_public_book_handles_cooks_inline_js_urls(monkeypatch):
+    class BookInfoRule:
+        def model_dump(self):
+            return {
+                "name": "$.data.articlename",
+                "coverUrl": "$.data.articleid\n<js>Cover(result)</js>",
+                "tocUrl": (
+                    "<js>var j=J(result);var d=j.data||j;var id=d.articleid||'';"
+                    "Base()+'/api/chapter/list/'+id+'?lang=zh-CN'</js>"
+                ),
+            }
+
+    source = SimpleNamespace(
+        id="src-cooks",
+        bookSourceName="番茄小说源",
+        bookSourceUrl="https://novel.cooks.tw",
+        enabled=True,
+        headers={},
+        ruleBookInfo=BookInfoRule(),
+        ruleToc=SimpleNamespace(chapterList="$.data[*]"),
+    )
+    _install_fake_source(monkeypatch, source)
+    _install_empty_public_cache(monkeypatch)
+
+    async def fake_get(url, headers=None):
+        assert url == "https://novel.cooks.tw/api/novel/detail/416?lang=zh-CN"
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(
+                {"code": 200, "data": {"articleid": 416, "articlename": "风水之王"}},
+                ensure_ascii=False,
+            ),
+        }
+
+    monkeypatch.setattr(public_api.http_client, "get", fake_get)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/book?"
+        "url=https%3A%2F%2Fnovel.cooks.tw%2Fapi%2Fnovel%2Fdetail%2F416%3Flang%3Dzh-CN"
+        "&sourceId=src-cooks"
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["coverUrl"] == "https://pic.cooks.tw/0/416/416s.jpg"
+    assert data["tocUrl"] == (
+        "http://testserver/api/toc?"
+        "url=https%3A%2F%2Fnovel.cooks.tw%2Fapi%2Fchapter%2Flist%2F416%3Flang%3Dzh-CN"
+        "&sourceId=src-cooks"
+    )
+
+
 def test_public_toc_follows_next_toc_url_and_current_item_attrs(monkeypatch):
     class TocRule:
         chapterList = "#chapterlist dd a"
@@ -336,6 +407,71 @@ def test_public_toc_follows_next_toc_url_and_current_item_attrs(monkeypatch):
         "http://testserver/api/content?"
         "url=https%3A%2F%2Fsource.example%2Fbook%2F1%2Fc1.html&sourceId=src-paged-toc"
     )
+
+
+def test_public_toc_handles_cooks_inline_js_chapter_urls(monkeypatch):
+    class TocRule:
+        chapterList = "$.data[*]"
+
+        def model_dump(self):
+            return {
+                "chapterList": "$.data[*]",
+                "chapterName": "$.chaptername||$.title",
+                "chapterUrl": (
+                    "$.chapterid\n<js>var aid='';try{aid=cache.getFromMemory('articleid')||'';}"
+                    "catch(e){}if(!aid){var m=String(baseUrl||'').match(/list\\/(\\d+)/);"
+                    "if(m)aid=m[1];}Base()+'/api/chapter/content/'+aid+'/'+result+'?lang=zh-CN'</js>"
+                ),
+            }
+
+    source = SimpleNamespace(
+        id="src-cooks-toc",
+        bookSourceName="番茄小说源",
+        bookSourceUrl="https://novel.cooks.tw",
+        enabled=True,
+        headers={},
+        ruleToc=TocRule(),
+    )
+    _install_fake_source(monkeypatch, source)
+    _install_empty_public_cache(monkeypatch)
+
+    async def fake_get(url, headers=None):
+        assert url == "https://novel.cooks.tw/api/chapter/list/416?lang=zh-CN"
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(
+                {"code": 200, "data": [{"chapterid": 4553, "chaptername": "第1章 妖胎"}]},
+                ensure_ascii=False,
+            ),
+        }
+
+    monkeypatch.setattr(public_api.http_client, "get", fake_get)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/toc?"
+        "url=https%3A%2F%2Fnovel.cooks.tw%2Fapi%2Fchapter%2Flist%2F416%3Flang%3Dzh-CN"
+        "&sourceId=src-cooks-toc"
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data == [
+        {
+            "name": "第1章 妖胎",
+            "url": (
+                "http://testserver/api/content?"
+                "url=https%3A%2F%2Fnovel.cooks.tw%2Fapi%2Fchapter%2Fcontent%2F416%2F4553%3Flang%3Dzh-CN"
+                "&sourceId=src-cooks-toc"
+            ),
+            "chapterUrl": (
+                "http://testserver/api/content?"
+                "url=https%3A%2F%2Fnovel.cooks.tw%2Fapi%2Fchapter%2Fcontent%2F416%2F4553%3Flang%3Dzh-CN"
+                "&sourceId=src-cooks-toc"
+            ),
+        }
+    ]
 
 
 def test_public_content_follows_next_content_url_and_filters(monkeypatch):
@@ -414,6 +550,70 @@ def test_public_content_does_not_concatenate_next_chapter(monkeypatch):
     assert response.status_code == 200
     assert response.json()["data"]["content"] == "本章正文"
     assert calls == ["https://source.example/book/1/c1.html"]
+
+
+def test_public_content_does_not_fall_back_from_xsw_mobile_to_desktop(monkeypatch):
+    class ContentRule:
+        def model_dump(self):
+            return {"content": "#nr1@html"}
+
+    source = SimpleNamespace(
+        headers={},
+        ruleContent=ContentRule(),
+    )
+    mobile_url = "https://m.xsw.tw/1630904/255350744.html"
+    calls = []
+
+    async def fake_get(url, headers=None):
+        calls.append(url)
+        if url == mobile_url:
+            return {"status": 0, "headers": {}, "body": ""}
+        raise AssertionError(f"unexpected fallback request: {url}")
+
+    monkeypatch.setattr(public_api.http_client, "get", fake_get)
+
+    content, failed_status = asyncio.run(_collect_content_pages(source, mobile_url))
+
+    assert failed_status == 0
+    assert content == ""
+    assert calls == [mobile_url]
+
+
+def test_public_content_prefers_xsw_mobile_when_start_url_is_desktop(monkeypatch):
+    class ContentRule:
+        def model_dump(self):
+            return {"content": "#nr1@html"}
+
+    source = SimpleNamespace(
+        headers={},
+        ruleContent=ContentRule(),
+    )
+    desktop_url = "https://www.xsw.tw/book/1630904/255350744.html"
+    mobile_url = "https://m.xsw.tw/1630904/255350744.html"
+    calls = []
+
+    async def fake_get(url, headers=None):
+        calls.append(url)
+        if url == mobile_url:
+            return {
+                "status": 200,
+                "headers": {"Content-Type": "text/html; charset=big5"},
+                "body": '<div id="nr1">完整正文<br/>第二行</div>',
+            }
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "text/html; charset=big5"},
+            "body": '<div id="new_content">不完整正文</div>',
+        }
+
+    monkeypatch.setattr(public_api.http_client, "get", fake_get)
+
+    content, failed_status = asyncio.run(_collect_content_pages(source, desktop_url))
+
+    assert failed_status is None
+    assert "完整正文" in content
+    assert "不完整正文" not in content
+    assert calls == [mobile_url]
 
 
 def test_public_explore_extracts_books_and_next_url(monkeypatch):

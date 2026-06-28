@@ -78,6 +78,37 @@ def test_xsw_aes_content_rule():
     assert result == "&nbsp;&nbsp;正文<br>下一行"
 
 
+def test_content_filter_preserves_newline_replacement():
+    html = "<div id='chapter'>第一段<br/>第二段&nbsp;&nbsp;尾</div>"
+    result = RuleEngine.apply_rules(
+        html,
+        {
+            "content": "#chapter@html",
+            "contentFilter": [
+                r"<br\s*/?>##" + "\n",
+                "&nbsp;## ",
+                "\xa0## ",
+            ],
+        },
+    )
+
+    assert result["content"] == "第一段\n第二段  尾"
+
+
+def test_content_filter_can_remove_spaces_between_cjk_chars():
+    result = RuleEngine.apply_rules(
+        "<div id='chapter'>警 察 局 。 2 1</div>",
+        {
+            "content": "#chapter@html",
+            "contentFilter": [
+                r"(?<=[\u4e00-\u9fff0-9，。！？；：“”‘’、])[\u00a0 ]+(?=[\u4e00-\u9fff0-9，。！？；：“”‘’、])##",
+            ],
+        },
+    )
+
+    assert result["content"] == "警察局。21"
+
+
 # ---------------- apply_rules ----------------
 
 
@@ -127,6 +158,85 @@ def test_apply_rules_search_list_with_legado_js_suffix():
     result = RuleEngine.apply_rules(content, rules, is_json=True)
     assert result["bookList"][0]["name"] == "岁月书"
     assert result["bookList"][0]["noteUrl"] == "/book/1/"
+
+
+def test_apply_rules_json_list_renders_template_fields():
+    data = {
+        "data": {
+            "items": [
+                {
+                    "articleid": 416,
+                    "articlename": "风水之王",
+                    "author": "紫梦游龙",
+                }
+            ]
+        }
+    }
+
+    result = RuleEngine.apply_rules(
+        json.dumps(data, ensure_ascii=False),
+        {
+            "bookList": "$.data.items[*]",
+            "name": "$.articlename",
+            "author": "$.author",
+            "bookUrl": "https://novel.cooks.tw/api/novel/detail/{{$.articleid}}?lang=zh-CN",
+        },
+        is_json=True,
+    )
+
+    assert result["bookList"][0]["name"] == "风水之王"
+    assert result["bookList"][0]["bookUrl"] == "https://novel.cooks.tw/api/novel/detail/416?lang=zh-CN"
+
+
+def test_apply_rules_handles_cooks_inline_js_book_info():
+    data = {"code": 200, "data": {"articleid": 416, "articlename": "风水之王"}}
+    result = RuleEngine.apply_rules(
+        json.dumps(data, ensure_ascii=False),
+        {
+            "coverUrl": "$.data.articleid\n<js>Cover(result)</js>",
+            "tocUrl": (
+                "<js>var j=J(result);var d=j.data||j;var id=d.articleid||'';"
+                "Base()+'/api/chapter/list/'+id+'?lang=zh-CN'</js>"
+            ),
+        },
+        is_json=True,
+        base_url="https://novel.cooks.tw/api/novel/detail/416?lang=zh-CN",
+    )
+
+    assert result["coverUrl"] == "https://pic.cooks.tw/0/416/416s.jpg"
+    assert result["tocUrl"] == "https://novel.cooks.tw/api/chapter/list/416?lang=zh-CN"
+
+
+def test_apply_rules_json_list_handles_or_rules_and_cooks_chapter_url_js():
+    data = {
+        "code": 200,
+        "data": [{"chapterid": 4553, "chaptername": "第1章 妖胎"}],
+    }
+
+    result = RuleEngine.apply_rules(
+        json.dumps(data, ensure_ascii=False),
+        {
+            "chapterList": (
+                "$.data[*]||$.data.items[*]||$.data.list[*]||$.data.chapterlist[*]"
+                "||$.data.chapterList[*]||$.data.chapters[*]"
+            ),
+            "chapterName": "$.chaptername||$.chapter_name||$.chapterName||$.title||$.name",
+            "chapterUrl": (
+                "$.chapterid\n<js>var aid='';try{aid=cache.getFromMemory('articleid')||'';}"
+                "catch(e){}if(!aid){var m=String(baseUrl||'').match(/list\\/(\\d+)/);"
+                "if(m)aid=m[1];}Base()+'/api/chapter/content/'+aid+'/'+result+'?lang=zh-CN'</js>"
+            ),
+        },
+        is_json=True,
+        base_url="https://novel.cooks.tw/api/chapter/list/416?lang=zh-CN",
+    )
+
+    assert result["chapterList"] == [
+        {
+            "chapterName": "第1章 妖胎",
+            "chapterUrl": "https://novel.cooks.tw/api/chapter/content/416/4553?lang=zh-CN",
+        }
+    ]
 
 
 def test_css_selector_attr():

@@ -13,6 +13,7 @@ import json
 import logging
 import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -29,6 +30,8 @@ _JSON_PREFIX = "@json:"
 _JSONPATH_PREFIX = "$"
 _XSW_AES_CONTENT_RULE = "@xsw-aes-content"
 _FILTER_SUFFIX = "Filter"
+_JS_UNHANDLED = object()
+_SIMPLE_JSONPATH_UNHANDLED = object()
 _META_RULE_KEYS = {"init"}
 _LIST_PAGE_RULE_KEYS = {
     "bookList": {"nextUrl"},
@@ -42,7 +45,12 @@ class RuleEngine:
     # ---------------- 公共入口 ----------------
 
     @staticmethod
-    def extract(content: str, rule: str, is_json: bool = False) -> Any:
+    def extract(
+        content: str,
+        rule: str,
+        is_json: bool = False,
+        base_url: str = "",
+    ) -> Any:
         """根据单条规则从内容中提取数据。
 
         Args:
@@ -59,11 +67,15 @@ class RuleEngine:
         try:
             rule = str(rule).strip()
             if "##" in rule:
-                return RuleEngine._apply_regex_replacement(content, rule, is_json)
+                return RuleEngine._apply_regex_replacement(content, rule, is_json, base_url)
             for operator in ("||", "%%", "&&"):
                 parts = RuleEngine._split_rule_operator(rule, operator)
                 if len(parts) > 1:
-                    return RuleEngine._apply_operator_rules(content, parts, operator, is_json)
+                    return RuleEngine._apply_operator_rules(content, parts, operator, is_json, base_url)
+
+            js_result = RuleEngine._apply_inline_js_rule(content, rule, is_json, base_url)
+            if js_result is not _JS_UNHANDLED:
+                return js_result
 
             rule = RuleEngine._strip_legado_scripts(rule)
             if not rule:
@@ -74,7 +86,7 @@ class RuleEngine:
 
             # 复合规则：规则1$$规则2 依次应用
             if "$$" in rule:
-                return RuleEngine._apply_compound(content, rule, is_json)
+                return RuleEngine._apply_compound(content, rule, is_json, base_url)
 
             return RuleEngine._extract_html(content, rule)
         except Exception as e:  # noqa: BLE001
@@ -82,7 +94,12 @@ class RuleEngine:
             return None
 
     @staticmethod
-    def apply_rules(content: str, rules: dict, is_json: bool = False) -> dict:
+    def apply_rules(
+        content: str,
+        rules: dict,
+        is_json: bool = False,
+        base_url: str = "",
+    ) -> dict:
         """对一组规则批量提取，返回字段字典。
 
         Args:
@@ -102,14 +119,14 @@ class RuleEngine:
         )
 
         if list_key:
-            return RuleEngine._apply_list_rules(content, rules, list_key, is_json)
+            return RuleEngine._apply_list_rules(content, rules, list_key, is_json, base_url)
 
         # 普通字段提取
         result: dict[str, Any] = {}
         for field, rule in rules.items():
             if not rule or RuleEngine._is_non_extract_rule(field):
                 continue
-            val = RuleEngine.extract(content, rule, is_json)
+            val = RuleEngine.extract(content, rule, is_json, base_url)
             result[field] = RuleEngine._normalize_value(val)
         return RuleEngine._apply_field_filters(result, rules)
 
@@ -131,11 +148,16 @@ class RuleEngine:
         """对已解析的 JSON 数据执行 JsonPath 查询。"""
         rule = RuleEngine._strip_legado_scripts(str(rule))
         rule = rule.removeprefix(_JSON_PREFIX)
+        if "{{" in rule and "}}" in rule:
+            return RuleEngine._render_json_template(data, rule)
         if not rule.startswith("$"):
             # 不是 JsonPath，尝试当作键名
             if isinstance(data, dict) and rule in data:
                 return data[rule]
             return None
+        simple_result = RuleEngine._simple_jsonpath_query(data, rule)
+        if simple_result is not _SIMPLE_JSONPATH_UNHANDLED:
+            return simple_result
         try:
             expr = jsonpath_parse(rule)
             matches = [m.value for m in expr.find(data)]
@@ -147,6 +169,77 @@ class RuleEngine:
         except Exception as e:  # noqa: BLE001
             logger.debug("JsonPath 查询失败 rule=%r err=%s", rule, e)
             return None
+
+    @staticmethod
+    def _simple_jsonpath_query(data: Any, rule: str) -> Any:
+        """Fast path for common JsonPath rules such as ``$.data[*]``."""
+        rule = str(rule or "").strip()
+        if rule == "$":
+            return data
+        if not re.fullmatch(r"\$(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[(?:\*|\d+)\])?)*", rule):
+            return _SIMPLE_JSONPATH_UNHANDLED
+
+        current: list[Any] = [data]
+        for segment in re.finditer(r"\.([A-Za-z_][A-Za-z0-9_]*)(?:\[(\*|\d+)\])?", rule[1:]):
+            key = segment.group(1)
+            index = segment.group(2)
+            next_values: list[Any] = []
+
+            for item in current:
+                if not isinstance(item, dict) or key not in item:
+                    continue
+                value = item[key]
+                if index == "*":
+                    if isinstance(value, list):
+                        next_values.extend(value)
+                    elif value is not None:
+                        next_values.append(value)
+                elif index is not None:
+                    if isinstance(value, list):
+                        position = int(index)
+                        if 0 <= position < len(value):
+                            next_values.append(value[position])
+                elif value is not None:
+                    next_values.append(value)
+
+            current = next_values
+            if not current:
+                return None
+
+        if not current:
+            return None
+        if len(current) == 1:
+            return current[0]
+        return current
+
+    @staticmethod
+    def _render_json_template(data: Any, template: str) -> str:
+        """Render simple Legado JSON placeholders such as ``{{$.articleid}}``."""
+
+        def replace(match: re.Match[str]) -> str:
+            expr = match.group(1).strip()
+            if not expr:
+                return ""
+            try:
+                simple_result = RuleEngine._simple_jsonpath_query(data, expr)
+                if simple_result is not _SIMPLE_JSONPATH_UNHANDLED:
+                    matches = [] if simple_result is None else (
+                        simple_result if isinstance(simple_result, list) else [simple_result]
+                    )
+                else:
+                    parsed = jsonpath_parse(expr)
+                    matches = [item.value for item in parsed.find(data)]
+            except Exception as e:  # noqa: BLE001
+                logger.debug("JSON 模板渲染失败 expr=%r err=%s", expr, e)
+                return ""
+            if not matches:
+                return ""
+            value = matches[0]
+            if value is None:
+                return ""
+            return str(value)
+
+        return re.sub(r"\{\{([^{}]+)\}\}", replace, str(template))
 
     # ---------------- HTML / XPath / CSS / Regex ----------------
 
@@ -249,35 +342,53 @@ class RuleEngine:
             iv = bytes.fromhex(iv_match.group(1))
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             decryptor = cipher.decryptor()
-            decrypted = decryptor.update(encrypted) + decryptor.finalize()
-            return decrypted.rstrip(b"\x00").decode("utf-8", errors="replace")
+            decrypted = (decryptor.update(encrypted) + decryptor.finalize()).rstrip(b"\x00")
+            return RuleEngine._decode_text_bytes(decrypted)
         except Exception as e:  # noqa: BLE001
             logger.debug("xsw.tw AES 正文解密失败: %s", e)
             return None
 
     @staticmethod
-    def _apply_compound(content: str, rule: str, is_json: bool) -> Any:
+    def _decode_text_bytes(raw: bytes) -> str:
+        best_text = ""
+        best_score: int | None = None
+        for charset in ("utf-8", "big5", "gb18030"):
+            text = raw.decode(charset, errors="replace")
+            score = text.count("\ufffd")
+            if best_score is None or score < best_score:
+                best_text = text
+                best_score = score
+                if score == 0:
+                    break
+        return best_text.strip()
+
+    @staticmethod
+    def _apply_compound(content: str, rule: str, is_json: bool, base_url: str = "") -> Any:
         """应用复合规则（规则1$$规则2）：前者结果作为后者输入。"""
         parts = rule.split("$$", 1)
         first_rule = parts[0].strip()
         second_rule = parts[1].strip()
-        first_result = RuleEngine.extract(content, first_rule, is_json)
+        first_result = RuleEngine.extract(content, first_rule, is_json, base_url)
         if first_result is None:
             return None
         if isinstance(first_result, list):
-            return [RuleEngine.extract(str(item), second_rule, is_json) for item in first_result]
-        return RuleEngine.extract(str(first_result), second_rule, is_json)
+            return [RuleEngine.extract(str(item), second_rule, is_json, base_url) for item in first_result]
+        return RuleEngine.extract(str(first_result), second_rule, is_json, base_url)
 
     @staticmethod
     def _apply_list_rules(
-        content: str, rules: dict, list_key: str, is_json: bool
+        content: str,
+        rules: dict,
+        list_key: str,
+        is_json: bool,
+        base_url: str = "",
     ) -> dict:
         """处理包含列表规则的规则集（如 ruleSearch.bookList）。"""
         list_rule = RuleEngine._strip_legado_scripts(str(rules.get(list_key, "")))
         if not list_rule:
             return {}
 
-        items = RuleEngine._extract_list_items(content, list_rule, is_json)
+        items = RuleEngine._extract_list_items(content, list_rule, is_json, base_url)
         if items is None:
             items = []
 
@@ -299,11 +410,11 @@ class RuleEngine:
         for item in items:
             entry: dict[str, Any] = {}
             if is_json:
-                # 对每个列表元素应用 JsonPath
+                item_content = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
                 for field, rule in child_rules.items():
                     if not rule:
                         continue
-                    val = RuleEngine._jsonpath_query(item, rule)
+                    val = RuleEngine.extract(item_content, rule, is_json=True, base_url=base_url)
                     entry[field] = RuleEngine._normalize_value(val)
             else:
                 # HTML 列表：对每个节点片段应用子规则
@@ -313,23 +424,28 @@ class RuleEngine:
                 for field, rule in child_rules.items():
                     if not rule:
                         continue
-                    val = RuleEngine._extract_item_child_rule(item_html, rule, is_json)
+                    val = RuleEngine._extract_item_child_rule(item_html, rule, is_json, base_url)
                     entry[field] = RuleEngine._normalize_value(val)
             entry = RuleEngine._apply_field_filters(entry, rules)
             results.append(entry)
 
         result: dict[str, Any] = {list_key: results}
         for field, rule in page_rules.items():
-            val = RuleEngine.extract(content, rule, is_json)
+            val = RuleEngine.extract(content, rule, is_json, base_url)
             result[field] = RuleEngine._normalize_value(val)
 
         return result
 
     @staticmethod
-    def _extract_list_items(content: str, list_rule: str, is_json: bool) -> Any:
+    def _extract_list_items(
+        content: str,
+        list_rule: str,
+        is_json: bool,
+        base_url: str = "",
+    ) -> Any:
         """Extract list items while preserving HTML node snippets for child rules."""
         if is_json:
-            return RuleEngine.extract(content, list_rule, is_json=True)
+            return RuleEngine.extract(content, list_rule, is_json=True, base_url=base_url)
 
         rule = RuleEngine._strip_legado_scripts(list_rule)
         if rule.startswith(_CSS_PREFIX):
@@ -360,20 +476,25 @@ class RuleEngine:
             return [str(el) for el in elements]
         except Exception as e:  # noqa: BLE001
             logger.debug("列表 CSS 提取失败 rule=%r err=%s", rule, e)
-            return RuleEngine.extract(content, rule, is_json=False)
+            return RuleEngine.extract(content, rule, is_json=False, base_url=base_url)
 
     @staticmethod
-    def _extract_item_child_rule(item_html: str, rule: str, is_json: bool) -> Any:
+    def _extract_item_child_rule(
+        item_html: str,
+        rule: str,
+        is_json: bool,
+        base_url: str = "",
+    ) -> Any:
         """Apply a child rule to a list item, supporting current-node attrs."""
         if is_json:
-            return RuleEngine.extract(item_html, rule, is_json)
+            return RuleEngine.extract(item_html, rule, is_json, base_url)
 
         normalized_rule = RuleEngine._strip_legado_scripts(str(rule))
         if RuleEngine._is_current_item_attr_rule(normalized_rule):
             value = RuleEngine._extract_current_item_attr(item_html, normalized_rule)
             if value is not None:
                 return value
-        return RuleEngine.extract(item_html, rule, is_json)
+        return RuleEngine.extract(item_html, rule, is_json, base_url)
 
     @staticmethod
     def _is_current_item_attr_rule(rule: str) -> bool:
@@ -479,14 +600,15 @@ class RuleEngine:
             return operations
 
         if isinstance(filter_rule, str):
-            text = filter_rule.strip()
-            if not text:
+            text = str(filter_rule)
+            if not text.strip():
                 return operations
             if "##" in text:
                 pattern, replacement = text.split("##", 1)
-                operations.append((pattern, replacement))
+                if pattern:
+                    operations.append((pattern, replacement))
             else:
-                operations.append((text, ""))
+                operations.append((text.strip(), ""))
             return operations
 
         if isinstance(filter_rule, list):
@@ -506,11 +628,17 @@ class RuleEngine:
         return target_field != "content"
 
     @staticmethod
-    def _apply_operator_rules(content: str, parts: list[str], operator: str, is_json: bool) -> Any:
+    def _apply_operator_rules(
+        content: str,
+        parts: list[str],
+        operator: str,
+        is_json: bool,
+        base_url: str = "",
+    ) -> Any:
         """Apply Legado ``&&`` / ``||`` / ``%%`` connectors."""
         values: list[Any] = []
         for part in parts:
-            value = RuleEngine.extract(content, part, is_json)
+            value = RuleEngine.extract(content, part, is_json, base_url)
             normalized = RuleEngine._normalize_value(value)
             if operator == "||":
                 if RuleEngine._has_value(normalized):
@@ -536,7 +664,12 @@ class RuleEngine:
         return flattened
 
     @staticmethod
-    def _apply_regex_replacement(content: str, rule: str, is_json: bool) -> Any:
+    def _apply_regex_replacement(
+        content: str,
+        rule: str,
+        is_json: bool,
+        base_url: str = "",
+    ) -> Any:
         """Apply Legado ``rule##regex##replacement`` purification rules."""
         parts = rule.split("##", 2)
         if len(parts) < 2:
@@ -553,7 +686,11 @@ class RuleEngine:
         if not source_rule:
             source_rule = "all"
 
-        source_value = content if source_rule == "all" else RuleEngine.extract(content, source_rule, is_json)
+        source_value = (
+            content
+            if source_rule == "all"
+            else RuleEngine.extract(content, source_rule, is_json, base_url)
+        )
         source_value = RuleEngine._normalize_value(source_value)
 
         def replace_one(value: Any) -> str:
@@ -562,6 +699,151 @@ class RuleEngine:
         if isinstance(source_value, list):
             return [replace_one(item) for item in source_value]
         return replace_one(source_value)
+
+    @staticmethod
+    def _apply_inline_js_rule(
+        content: str,
+        rule: str,
+        is_json: bool,
+        base_url: str = "",
+    ) -> Any:
+        """Apply a small supported subset of Legado ``<js>`` result transforms."""
+        if "<js" not in str(rule).lower():
+            return _JS_UNHANDLED
+
+        match = re.search(r"<js>(.*?)</js>", str(rule), flags=re.S | re.I)
+        if not match:
+            return _JS_UNHANDLED
+
+        source_rule = str(rule)[: match.start()].strip()
+        source_value = (
+            RuleEngine.extract(content, source_rule, is_json, base_url)
+            if source_rule
+            else content
+        )
+        return RuleEngine._apply_supported_js_transform(
+            source_value,
+            match.group(1),
+            content,
+            base_url,
+        )
+
+    @staticmethod
+    def _apply_supported_js_transform(
+        source_value: Any,
+        script: str,
+        content: str,
+        base_url: str = "",
+    ) -> Any:
+        script = str(script or "")
+
+        if "Cover(result)" in script and "novel.cooks.tw" in str(base_url):
+            return RuleEngine._cooks_cover_url(source_value)
+
+        if re.search(r"\b(?:Clean|T)\s*\(\s*result\s*\)", script):
+            return RuleEngine._clean_legado_text(source_value)
+
+        if "/api/chapter/list/" in script:
+            article_id = RuleEngine._extract_article_id(content, base_url)
+            origin = RuleEngine._origin_from_url(base_url)
+            if article_id and origin:
+                return f"{origin}/api/chapter/list/{article_id}{RuleEngine._lang_suffix(script, base_url)}"
+
+        if "/api/chapter/content/" in script:
+            chapter_id = re.sub(r"\D", "", str(source_value or ""))
+            article_id = RuleEngine._extract_article_id("", base_url)
+            origin = RuleEngine._origin_from_url(base_url)
+            if article_id and chapter_id and origin:
+                return (
+                    f"{origin}/api/chapter/content/{article_id}/{chapter_id}"
+                    f"{RuleEngine._lang_suffix(script, base_url)}"
+                )
+
+        return _JS_UNHANDLED
+
+    @staticmethod
+    def _cooks_cover_url(value: Any) -> str:
+        book_id = re.sub(r"\D", "", str(value or ""))
+        if not book_id:
+            return ""
+        numeric_id = int(book_id)
+        return f"https://pic.cooks.tw/{numeric_id // 1000}/{numeric_id}/{numeric_id}s.jpg"
+
+    @staticmethod
+    def _clean_legado_text(value: Any) -> str:
+        text = "\n".join(str(item) for item in value) if isinstance(value, list) else str(value or "")
+        replacements = (
+            (r"<br\s*/?>", "\n"),
+            (r"<p[^>]*>", "\n"),
+            (r"</p>", "\n"),
+            (r"<[^>]+>", ""),
+            (r"&nbsp;", " "),
+            (r"&amp;", "&"),
+            (r"&lt;", "<"),
+            (r"&gt;", ">"),
+            (r"&#39;", "'"),
+            (r"&quot;", '"'),
+            (r"\r", ""),
+            (r"[ \t]+\n", "\n"),
+            (r"\n{3,}", "\n\n"),
+        )
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.I)
+        return text.strip()
+
+    @staticmethod
+    def _extract_article_id(value: Any, base_url: str = "") -> str:
+        article_id = RuleEngine._article_id_from_jsonish(value)
+        if article_id:
+            return article_id
+
+        text = str(base_url or value or "")
+        for pattern in (
+            r"/api/novel/detail/(\d+)",
+            r"/api/chapter/list/(\d+)",
+            r"/novel/detail/(\d+)",
+            r"/detail/(\d+)",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
+
+    @staticmethod
+    def _article_id_from_jsonish(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("articleid", "articleId", "bookid", "bookId"):
+                if value.get(key):
+                    return re.sub(r"\D", "", str(value[key]))
+            nested = value.get("data")
+            if isinstance(nested, dict):
+                return RuleEngine._article_id_from_jsonish(nested)
+            return ""
+
+        if not isinstance(value, str):
+            return ""
+
+        text = value.strip()
+        if not text.startswith(("{", "[")):
+            return ""
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return ""
+        return RuleEngine._article_id_from_jsonish(parsed)
+
+    @staticmethod
+    def _origin_from_url(url: str) -> str:
+        parsed = urlparse(str(url or ""))
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    @staticmethod
+    def _lang_suffix(script: str, base_url: str = "") -> str:
+        if "lang=zh-CN" in str(script) or "lang=zh-CN" in str(base_url):
+            return "?lang=zh-CN"
+        return ""
 
     @staticmethod
     def _strip_legado_scripts(rule: str) -> str:
@@ -591,7 +873,14 @@ class RuleEngine:
         escape = False
         bracket_depth = 0
         index = 0
+        lower_rule = rule.lower()
         while index < len(rule):
+            if lower_rule.startswith("<js>", index):
+                end_index = lower_rule.find("</js>", index + 4)
+                if end_index >= 0:
+                    index = end_index + len("</js>")
+                    continue
+
             char = rule[index]
             if escape:
                 escape = False

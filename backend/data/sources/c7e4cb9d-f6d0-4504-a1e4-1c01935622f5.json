@@ -32,7 +32,24 @@
     "chapterUrl": "a@href##^/book/(\\d+)/(\\d+\\.html)$##https://m.xsw.tw/\\1/\\2"
   },
   "ruleContent": {
-    "content": "#nr1@html"
+    "content": "#nr1@html||@xsw-aes-content",
+    "contentFilter": [
+      "<br\\s*/?>##\n",
+      "</p\\s*>##\n",
+      "<p[^>]*>##\n",
+      "<[^>]+>##",
+      "&nbsp;## ",
+      "\u00a0## ",
+      "(?<=[\\u4e00-\\u9fff0-9，。！？；：“”‘’、])[\\u00a0 ]+(?=[\\u4e00-\\u9fff0-9，。！？；：“”‘’、])##",
+      "&amp;##&",
+      "&lt;##<",
+      "&gt;##>",
+      "&#39;##'",
+      "&quot;##\"",
+      "\\r##",
+      "[ \\t]+\\n##\n",
+      "\\n{3,}##\n\n"
+    ]
   },
   "headers": {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

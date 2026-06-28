@@ -65,6 +65,11 @@ def test_resolve_relative_url_relative():
     assert result == "https://a.com/book/1.html"
 
 
+def test_resolve_relative_url_accepts_non_string_url():
+    result = resolve_relative_url("https://a.com/book/", 416)
+    assert result == "https://a.com/book/416"
+
+
 def test_same_mobile_www_site():
     assert _same_mobile_www_site("m.xsw.tw", "www.xsw.tw")
     assert _same_mobile_www_site("www.xsw.tw", "m.xsw.tw")
@@ -82,6 +87,14 @@ def test_normalize_toc_chapters():
         "https://example.com/book/1/",
     )
     assert chapters == [{"name": "第一章", "url": "https://example.com/book/1/1.html"}]
+
+
+def test_normalize_toc_chapters_prefers_xsw_mobile_chapter_url():
+    chapters = _normalize_toc_chapters(
+        [{"chapterName": "第一章", "chapterUrl": "/book/1630904/255350744.html"}],
+        "https://www.xsw.tw/book/1630904/",
+    )
+    assert chapters == [{"name": "第一章", "url": "https://m.xsw.tw/1630904/255350744.html"}]
 
 
 if __name__ == "__main__":
