@@ -59,6 +59,7 @@ backend/data/sources/
 docker-compose.override.yml
 
 # ====== 测试 & 覆盖率 ======
+backend/tests/private/
 htmlcov/
 .tox/
 .nox/

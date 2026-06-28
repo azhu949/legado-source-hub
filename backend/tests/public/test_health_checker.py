@@ -29,7 +29,7 @@ def test_health_check_tries_multiple_keywords(monkeypatch):
     async def fake_execute_request(request, source_headers=None):  # noqa: ARG001
         body = (
             "<html><body></body></html>"
-            if "测试" in request.url
+            if "无结果关键词" in request.url
             else "<html><body><div class='item'><a href='/book/1'>凡人修仙传</a>"
             "<span class='author'>忘语</span></div></body></html>"
         )
@@ -42,9 +42,10 @@ def test_health_check_tries_multiple_keywords(monkeypatch):
 
     monkeypatch.setattr(health_module, "build_search_request", fake_build_search_request)
     monkeypatch.setattr(health_module, "execute_request", fake_execute_request)
+    monkeypatch.setattr(health_module, "TEST_KEYWORDS", ("无结果关键词", "凡人修仙传"))
 
     result = asyncio.run(HealthChecker().check_source(source))
 
     assert result["status"] == "healthy"
     assert "凡人修仙传" in result["message"]
-    assert requested_keywords[:2] == ["测试", "凡人修仙传"]
+    assert requested_keywords[:2] == ["无结果关键词", "凡人修仙传"]
