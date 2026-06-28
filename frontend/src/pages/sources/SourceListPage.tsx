@@ -7,26 +7,37 @@ import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { SourceTable } from "@/components/sources/SourceTable"
 import { EmptyState } from "@/components/common/EmptyState"
+import { getLatestHealthRecords } from "@/api/health"
 import { getSources } from "@/api/sources"
 import { useSourceStore } from "@/stores/sourceStore"
+import type { HealthRecord } from "@/types/health"
 import type { BookSource } from "@/types/source"
 import { Plus, Upload, Search as SearchIcon } from "lucide-react"
 
 export default function SourceListPage() {
   const navigate = useNavigate()
   const { sources, totalCount, isLoading, filters, setSources, setLoading, setFilters } = useSourceStore()
+  const [healthBySource, setHealthBySource] = useState<Record<string, HealthRecord>>({})
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await getSources({
-        search: filters.search || undefined,
-        status: filters.status || undefined,
-        page: filters.page,
-        pageSize: filters.pageSize,
-      })
+      const [res, healthRes] = await Promise.all([
+        getSources({
+          search: filters.search || undefined,
+          status: filters.status || undefined,
+          page: filters.page,
+          pageSize: filters.pageSize,
+        }),
+        getLatestHealthRecords(),
+      ])
       if (res.success && res.data) {
         setSources(res.data.items as BookSource[], res.data.total)
+      }
+      if (healthRes.success && healthRes.data) {
+        setHealthBySource(
+          Object.fromEntries(healthRes.data.map((record) => [record.source_id, record])),
+        )
       }
     } catch {
       // ignore
@@ -90,7 +101,7 @@ export default function SourceListPage() {
           description="点击上方「新增书源」按钮添加第一个书源"
         />
       ) : (
-        <SourceTable data={sources} onRefresh={fetchData} />
+        <SourceTable data={sources} healthBySource={healthBySource} onRefresh={fetchData} />
       )}
     </div>
   )

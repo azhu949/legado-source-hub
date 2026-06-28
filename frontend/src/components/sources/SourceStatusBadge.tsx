@@ -7,9 +7,13 @@ interface SourceStatusBadgeProps {
   healthStatus?: "healthy" | "unhealthy" | "unknown"
 }
 
-export function SourceStatusBadge({ enabled, healthStatus = "unknown" }: SourceStatusBadgeProps) {
+export function SourceStatusBadge({ enabled, healthStatus }: SourceStatusBadgeProps) {
   if (!enabled) {
     return <Badge variant="secondary">禁用</Badge>
+  }
+
+  if (!healthStatus) {
+    return <Badge variant="success">启用</Badge>
   }
 
   switch (healthStatus) {

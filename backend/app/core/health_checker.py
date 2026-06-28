@@ -13,8 +13,8 @@ from app.models.database import add_health_record
 
 logger = logging.getLogger(__name__)
 
-# 健康检查测试关键词
-TEST_KEYWORD = "测试"
+# 健康检查测试关键词。单个泛词可能没有搜索结果，导致可用书源被误判。
+TEST_KEYWORDS = ("凡人修仙传", "捞尸人", "斗破苍穹", "遮天", "风水之王")
 
 
 class HealthChecker:
@@ -42,52 +42,63 @@ class HealthChecker:
         Returns:
             {"status": "healthy"/"unhealthy", "latency_ms": int, "message": str}
         """
-        request = await build_search_request(source, TEST_KEYWORD, 1)
-        if not request:
+        if not str(getattr(source, "searchUrl", "") or "").strip():
             return {
                 "status": "unhealthy",
                 "latency_ms": None,
                 "message": "缺少搜索URL模板",
             }
 
-        headers = source.headers or {}
-        result = await execute_request(request, source_headers=headers)
-
         status = "unhealthy"
-        message = ""
-        latency = result.get("elapsed_ms")
+        message = "规则未能提取到数据"
+        latency = None
+        headers = source.headers or {}
 
-        if result.get("status") == 0:
-            message = result.get("error", "请求失败")
-        elif result["status"] >= 400:
-            message = f"HTTP {result['status']}"
-        else:
-            # 检查规则是否仍能提取到数据
+        for keyword in TEST_KEYWORDS:
+            request = await build_search_request(source, keyword, 1)
+            if not request:
+                message = "搜索URL模板解析失败"
+                continue
+
+            result = await execute_request(request, source_headers=headers)
+            latency = result.get("elapsed_ms")
+
+            if result.get("status") == 0:
+                message = result.get("error", "请求失败")
+                continue
+            if result["status"] >= 400:
+                message = f"HTTP {result['status']}"
+                continue
+
             body = result.get("body", "")
-            is_json = response_is_json(result)
-            if body:
-                try:
-                    rule_search = source.ruleSearch
-                    if rule_search and rule_search.bookList:
-                        extracted = RuleEngine.apply_rules(
-                            body,
-                            {"bookList": rule_search.bookList},
-                            is_json=is_json,
-                        )
-                        books = extracted.get("bookList", []) if isinstance(extracted, dict) else []
-                        if books:
-                            status = "healthy"
-                            message = f"成功提取 {len(books)} 条结果"
-                        else:
-                            message = "规则未能提取到数据"
-                    else:
-                        # 无规则，仅检查 HTTP 可达性
-                        status = "healthy"
-                        message = "HTTP 可达"
-                except Exception as e:  # noqa: BLE001
-                    message = f"规则解析异常: {e}"
-            else:
+            if not body:
                 message = "响应体为空"
+                continue
+
+            try:
+                rule_search = source.ruleSearch
+                if not rule_search or not rule_search.bookList:
+                    status = "healthy"
+                    message = "HTTP 可达"
+                    break
+
+                extracted = RuleEngine.apply_rules(
+                    body,
+                    rule_search.model_dump(),
+                    is_json=response_is_json(result),
+                    base_url=request.url,
+                )
+                books = extracted.get("bookList", []) if isinstance(extracted, dict) else []
+                if isinstance(books, dict):
+                    books = [books]
+                if books:
+                    status = "healthy"
+                    message = f"关键词「{keyword}」成功提取 {len(books)} 条结果"
+                    break
+
+                message = f"关键词「{keyword}」未提取到数据"
+            except Exception as e:  # noqa: BLE001
+                message = f"规则解析异常: {e}"
 
         return {"status": status, "latency_ms": latency, "message": message}
 

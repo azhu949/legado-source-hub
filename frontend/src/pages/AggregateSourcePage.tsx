@@ -4,9 +4,11 @@ import { useEffect, useMemo, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
 import { copyText, getAggregateSourceUrl } from "@/lib/aggregateSource"
-import { CheckCircle2, Copy, ExternalLink, FileJson, RefreshCw } from "lucide-react"
+import { CheckCircle2, Copy, ExternalLink, FileJson, QrCode, RefreshCw } from "lucide-react"
+import { QRCodeSVG } from "qrcode.react"
 import { toast } from "sonner"
 
 type LoadStatus = "loading" | "ready" | "error"
@@ -15,6 +17,7 @@ export default function AggregateSourcePage() {
   const aggregateSourceUrl = useMemo(() => getAggregateSourceUrl(), [])
   const [jsonText, setJsonText] = useState("")
   const [status, setStatus] = useState<LoadStatus>("loading")
+  const [qrOpen, setQrOpen] = useState(false)
 
   const loadAggregateSource = async () => {
     setStatus("loading")
@@ -96,6 +99,19 @@ export default function AggregateSourcePage() {
               <ExternalLink className="h-4 w-4" />
               打开 JSON
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCopyJson}
+              disabled={status !== "ready" || !jsonText}
+            >
+              <Copy className="h-4 w-4" />
+              复制 JSON
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setQrOpen(true)}>
+              <QrCode className="h-4 w-4" />
+              打开二维码
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -125,17 +141,29 @@ export default function AggregateSourcePage() {
               className="min-h-[420px] resize-y bg-muted/20 font-mono text-xs leading-relaxed"
             />
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleCopyJson}
-            disabled={status !== "ready" || !jsonText}
-          >
-            <Copy className="h-4 w-4" />
-            复制 JSON
-          </Button>
         </CardContent>
       </Card>
+
+      <Dialog open={qrOpen} onOpenChange={setQrOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>聚合书源二维码</DialogTitle>
+            <DialogDescription>使用阅读 APP 扫描后导入当前聚合书源地址</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col items-center gap-4">
+            <div className="rounded-md border bg-white p-4 shadow-sm">
+              <QRCodeSVG value={aggregateSourceUrl} size={240} level="M" includeMargin />
+            </div>
+            <div className="w-full rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs break-all">
+              {aggregateSourceUrl}
+            </div>
+            <Button size="sm" onClick={handleCopyUrl} className="w-full sm:w-auto">
+              <Copy className="h-4 w-4" />
+              复制地址
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

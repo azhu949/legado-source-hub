@@ -16,6 +16,10 @@ export async function getHealthRecords(params: {
   return apiClient.get("/health/records", { params })
 }
 
+export async function getLatestHealthRecords(): Promise<ApiResponse<HealthRecord[]>> {
+  return apiClient.get("/health/latest")
+}
+
 export async function getHealthTrend(): Promise<ApiResponse<HealthTrendPoint[]>> {
   return apiClient.get("/health/trend")
 }

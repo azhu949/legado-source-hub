@@ -9,6 +9,7 @@ from app.core.auth import get_current_user
 from app.core.health_checker import health_checker
 from app.models.database import (
     get_health_overview,
+    get_latest_health_records,
     get_health_trend,
     query_health_records,
 )
@@ -35,6 +36,12 @@ async def health_records(
     """健康检查记录列表。"""
     result = query_health_records(source_id=sourceId, page=page, page_size=pageSize)
     return paginate(result["items"], result["total"], result["page"], result["pageSize"])
+
+
+@router.get("/latest")
+async def health_latest(_user=Depends(get_current_user)):
+    """每个书源最近一次健康状态。"""
+    return success(data=get_latest_health_records())
 
 
 @router.get("/trend")

@@ -18,15 +18,18 @@ import { Switch } from "@/components/ui/switch"
 import { SourceStatusBadge } from "./SourceStatusBadge"
 import { ConfirmDialog } from "@/components/common/ConfirmDialog"
 import type { BookSource } from "@/types/source"
+import type { HealthRecord } from "@/types/health"
 import { toggleSource, deleteSource } from "@/api/sources"
+import { formatDate } from "@/lib/utils"
 import { toast } from "sonner"
 
 interface SourceTableProps {
   data: BookSource[]
+  healthBySource?: Record<string, HealthRecord>
   onRefresh: () => void
 }
 
-export function SourceTable({ data, onRefresh }: SourceTableProps) {
+export function SourceTable({ data, healthBySource = {}, onRefresh }: SourceTableProps) {
   const navigate = useNavigate()
   const [sorting, setSorting] = useState<SortingState>([])
   const [deleteTarget, setDeleteTarget] = useState<BookSource | null>(null)
@@ -89,7 +92,7 @@ export function SourceTable({ data, onRefresh }: SourceTableProps) {
     },
     {
       accessorKey: "enabled",
-      header: "状态",
+      header: "启用状态",
       cell: ({ row }) => (
         <div className="flex items-center gap-2">
           <Switch
@@ -100,6 +103,31 @@ export function SourceTable({ data, onRefresh }: SourceTableProps) {
           <SourceStatusBadge enabled={row.original.enabled} />
         </div>
       ),
+    },
+    {
+      id: "health",
+      header: "健康状态",
+      cell: ({ row }) => {
+        const health = healthBySource[row.original.id]
+        const status = health?.status ?? "unknown"
+        const detail = health
+          ? `${health.message || "无详情"}${health.checked_at ? ` · ${formatDate(health.checked_at)}` : ""}`
+          : "暂无健康检查记录"
+
+        return (
+          <div className="max-w-[220px]" title={detail}>
+            <div className="flex items-center gap-2">
+              <SourceStatusBadge enabled={row.original.enabled} healthStatus={status} />
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {health?.latency_ms != null ? `${health.latency_ms} ms` : "-"}
+              </span>
+            </div>
+            <div className="mt-1 truncate text-xs text-muted-foreground">
+              {health?.message || "暂无检查记录"}
+            </div>
+          </div>
+        )
+      },
     },
     {
       accessorKey: "bookSourceGroup",

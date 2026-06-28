@@ -183,6 +183,18 @@ def get_latest_health_by_source(source_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_latest_health_records() -> list[dict]:
+    """获取每个书源最近一次健康记录。"""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT h.* FROM health_records h "
+            "INNER JOIN (SELECT source_id, MAX(checked_at) AS max_ts FROM health_records GROUP BY source_id) latest "
+            "ON h.source_id = latest.source_id AND h.checked_at = latest.max_ts "
+            "ORDER BY h.checked_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_health_trend() -> list[dict]:
     """获取近24小时平均延迟趋势（按小时聚合）。"""
     now = datetime.now(timezone.utc)
